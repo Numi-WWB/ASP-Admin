@@ -17,7 +17,7 @@ Just credit me
 ## What's included
 
 **View / Browse**
-- World schema (item_template, spells, creatures, quests, loot, …)
+- World schema (items, spells, creatures, quests, loot, …)
 - Live characters, accounts, guilds
 - Auth realms, MoTD, autobroadcasts, IP-bans
 
