@@ -55,4 +55,4 @@ Just credit me
 - Some UI strings may be in german
 - Item creator is the most advanced tool. Other tools will be updated.
 - Worldserver reload (or restart) is required after most DB changes to take effect ingame.
-- Client restart is required after MPQ patches.
+- Client restart + deletion of "Cache" folder is required after MPQ patches.
