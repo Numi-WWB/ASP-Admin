@@ -2,9 +2,6 @@
 
 Browser-based admin tool for AzerothCore 3.3.5a private servers (ASP).
 
-This is open source. Feel free to expand or change it to you likings!
-Just credit me
-
 ## Quickstart
 
 1. **Run `install.bat`** — installs Python dependencies (Flask, pymysql).
