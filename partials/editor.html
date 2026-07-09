@@ -1,0 +1,545 @@
+
+  <nav class="sub-nav">
+    <button class="sub-nav-btn active" onclick="showSub('editor','items',this)">📦 Items</button>
+    <button class="sub-nav-btn" onclick="showSub('editor','spells',this)">🔮 Spells</button>
+    <button class="sub-nav-btn" onclick="showSub('editor','talents',this);initTalentEditor()">🌟 Talents</button>
+    <button class="sub-nav-btn" onclick="showSub('editor','creatures',this)">🐉 Creatures</button>
+    <button class="sub-nav-btn" onclick="showSub('editor','quests',this)">📜 Quests</button>
+    <button class="sub-nav-btn" onclick="showSub('editor','loot',this);initLootEditor()">🎲 Loot</button>
+    <button class="sub-nav-btn" onclick="showSub('editor','smartai',this)">🤖 SmartAI</button>
+  </nav>
+
+  <!-- ── ITEMS EDITOR ── -->
+  <div class="sub-page active" id="editor-items">
+
+    <!-- ── SCREEN 1: LANDING / MODE SELECT ── -->
+    <div id="editor-screen-landing">
+      <div class="page-title">
+        <span class="pt-icon">✏️</span>
+        <div><h2 style="color:var(--gold)">Item Editor</h2><p>item_template · Create · Edit · Delete</p></div>
+      </div>
+      <div class="mode-select-screen">
+        <h3>Choose your Edit-Mode</h3>
+        <div class="mode-cards">
+
+          <div class="mode-card mode-easy" onclick="openEditorMode('easy')">
+            <div class="mode-card-icon">🟢</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title">Easy Edit</div>
+              <div class="mode-card-desc">Only the most important fields — ideal for quick tweaks.</div>
+              <div class="mode-card-fields">Name · Quality · Stats · Damage · Level · Price</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+
+          <div class="mode-card mode-edit" onclick="openEditorMode('edit')">
+            <div class="mode-card-icon">🟡</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title">Edit</div>
+              <div class="mode-card-desc">All field groups, collapsible. The default workflow.</div>
+              <div class="mode-card-fields">Basics · Requirements · Stats · Damage · Sockets · Spells · Flags · Misc · Loot</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+
+          <div class="mode-card mode-pro" onclick="openEditorMode('pro')">
+            <div class="mode-card-icon">🟣</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title">Edit Pro</div>
+              <div class="mode-card-desc">All fields open, raw field names visible. For advanced users.</div>
+              <div class="mode-card-fields">All groups expanded · Raw field names · Scaling · All 5 spells</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+
+          <div class="mode-card mode-create" onclick="openItemCreateMode()" style="border-color:#1eff00">
+            <div class="mode-card-icon">✨</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title" style="color:#1eff00">Create</div>
+              <div class="mode-card-desc">Create new items — directly in DB + Item.dbc + MPQ patch.</div>
+              <div class="mode-card-fields">Auto-ID ≥ 60000 · DBC-Write · MPQ-Patch · Client-Sync</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SCREEN 3: EDITOR ── -->
+    <div id="editor-screen-editor" style="display:none;">
+
+      <div style="padding: 12px 0 0;">
+        <button class="mode-back-btn" onclick="goToLanding()">← Switch mode</button>
+      </div>
+
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+        <div>
+          <span id="editor-mode-badge"></span>
+          <div id="editor-server-status" class="server-status" style="display:inline-flex; margin-left:10px;">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="status-text">Server check…</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="editor-layout">
+
+        <!-- Sidebar -->
+        <div class="editor-sidebar">
+          <h3>🔍 Load Item</h3>
+          <div class="editor-search">
+            <input type="text" id="item-search-input" placeholder="Name or ID…" autocomplete="off">
+            <button class="e-btn e-btn-blue" onclick="searchItems()">↵</button>
+          </div>
+          <div class="search-results" id="search-results"></div>
+
+          <div style="margin: 16px 0; border-top: 1px solid var(--border);"></div>
+
+          <h3>📄 Choose template</h3>
+          <ul class="tpl-list" id="tpl-list">
+            <li style="color:var(--muted);font-size:0.75rem;padding:8px 10px;">Loading Templates…</li>
+          </ul>
+
+          <div style="margin: 16px 0; border-top: 1px solid var(--border);"></div>
+
+          <h3>⚠️ Delete</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin-bottom:8px;">Only custom items (entry ≥ 100000)</p>
+          <button class="e-btn e-btn-red" style="width:100%" onclick="deleteItem()">🗑 Delete item</button>
+        </div>
+
+        <!-- Main -->
+        <div class="editor-main">
+          <div class="editor-toolbar">
+            <button class="e-btn e-btn-gold" onclick="newItem()">＋ New Item</button>
+            <button class="e-btn e-btn-green" onclick="saveItem()">💾 Save</button>
+            <span class="entry-badge" id="editor-entry-badge">No Item loaded</span>
+            <span id="editor-dirty" style="display:none;color:var(--orange);font-size:0.78rem;">● Unsaved changes</span>
+            <div style="margin-left:auto; position:relative;">
+              <button class="e-btn" id="switch-mode-btn" onclick="toggleSwitchMenu()" style="font-size:0.78rem;">⇄ Switch mode</button>
+              <div id="switch-mode-menu" style="display:none; position:absolute; right:0; top:110%; background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:6px; z-index:100; min-width:160px; box-shadow:0 8px 24px rgba(0,0,0,0.4);">
+                <div class="switch-mode-item mode-easy"  onclick="switchMode('easy')" id="sm-easy">🟢 Easy Edit</div>
+                <div class="switch-mode-item mode-edit"  onclick="switchMode('edit')" id="sm-edit">🟡 Edit</div>
+                <div class="switch-mode-item mode-pro"   onclick="switchMode('pro')"  id="sm-pro">🟣 Edit Pro</div>
+              </div>
+            </div>
+          </div>
+          <div id="editor-form">
+            <p style="color:var(--muted);font-size:0.85rem;text-align:center;padding:40px 0;">
+              Choose an item via search, or load a template.
+            </p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ── SCREEN 4: CREATE MODE ── -->
+    <div id="editor-screen-create" style="display:none;">
+      <div style="padding:12px 0 0">
+        <button class="mode-back-btn" onclick="icBack()">← Switch mode</button>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <span class="mode-badge" style="background:rgba(30,255,0,.15);border:1px solid #1eff00;color:#1eff00;padding:4px 10px;border-radius:5px">✨ Create Mode</span>
+        <button class="e-btn" onclick="icShowSettings()" style="font-size:0.78rem">⚙ Settings</button>
+      </div>
+
+      <div class="editor-layout">
+        <aside class="editor-sidebar">
+          <h3>✨ Custom Items</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin:6px 0">
+            Self-created Items (ID ≥ 60000).
+          </p>
+          <button class="e-btn e-btn-green" style="width:100%;margin-bottom:10px" onclick="icNewItem()">＋ New Item</button>
+          <div id="ic-list" style="max-height:60vh;overflow-y:auto"></div>
+          <div style="margin:14px 0;border-top:1px solid var(--border)"></div>
+          <button class="e-btn" style="width:100%;font-size:0.78rem;margin-bottom:6px" onclick="icRebuildMpq()">🔁 Rebuild MPQ</button>
+          <button class="e-btn" style="width:100%;font-size:0.78rem" onclick="icShowMpqEditor()">📦 MPQ-Editor</button>
+        </aside>
+
+        <div class="editor-main">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+            <span class="entry-badge" id="ic-entry-badge">New ID will be assigned</span>
+            <span id="ic-status" style="color:var(--muted);font-size:0.78rem"></span>
+          </div>
+          <div id="ic-form"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── SPELLS / CREATURES / QUESTS PLACEHOLDER ── -->
+  <!-- ── SPELL EDITOR ── -->
+  <div class="sub-page" id="editor-spells">
+    <div id="spell-editor-screen-landing">
+      <div class="page-title">
+        <span class="pt-icon">🔮</span>
+        <div><h2 style="color:var(--cyan)">Spell Editor</h2><p>spell_threat · spell_bonus_data · spell_proc · spell_template · spell_cooldown_overrides</p></div>
+      </div>
+      <div class="mode-select-screen">
+        <h3>Choose your Edit-Mode</h3>
+        <div class="mode-cards">
+          <div class="mode-card mode-easy" onclick="openSpellEditor('basic')">
+            <div class="mode-card-icon">🟢</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title">Basic</div>
+              <div class="mode-card-desc">Proc-Chance, Threat-Mod and Bonus-Damage — the most common Overrides.</div>
+              <div class="mode-card-fields">ProcFlags · Chance · ThreatMod · DirectBonus · DotBonus</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+          <div class="mode-card mode-edit" onclick="openSpellEditor('full')">
+            <div class="mode-card-icon">🟡</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title">Full Edit</div>
+              <div class="mode-card-desc">All Override-Tables + Cooldown + Attributes.</div>
+              <div class="mode-card-fields">All spell_template + spell_proc + spell_threat + spell_bonus + Cooldowns</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+          <div class="mode-card mode-create" onclick="openSpellCreateMode()" style="border-color:#1eff00">
+            <div class="mode-card-icon">✨</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title" style="color:#1eff00">Create</div>
+              <div class="mode-card-desc">Create new spells — re-use existing visuals/icons.</div>
+              <div class="mode-card-fields">Auto-ID ≥ 5000000 · DoT/HoT/AoE/Heal/Buff Templates · spell_dbc directly</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+        </div>
+        <p style="color:var(--muted);font-size:0.78rem;margin-top:16px;">⚠️ spell_dbc is READ ONLY for vanilla IDs. Overrides write to spell_template / spell_proc / spell_threat / spell_bonus_data. Custom spells (≥5000000) → directly into spell_dbc via Create mode.</p>
+      </div>
+    </div>
+
+    <!-- ── SPELL CREATE SCREEN ── -->
+    <div id="spell-editor-screen-create" style="display:none">
+      <div style="padding:12px 0 0">
+        <button class="mode-back-btn" onclick="scBack()">← Switch mode</button>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <span class="mode-badge" style="background:rgba(30,255,0,.15);border:1px solid #1eff00;color:#1eff00;padding:4px 10px;border-radius:5px">✨ Spell Create Mode</span>
+        <button class="e-btn" onclick="openSpellEasyMode()" style="border-color:#69ccf0;color:#69ccf0;background:rgba(105,204,240,.12)">🟢 Easy Mode</button>
+      </div>
+
+      <div class="editor-layout">
+        <aside class="editor-sidebar">
+          <h3>✨ Custom Spells</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin:6px 0">Self-created Spells (ID ≥ 5000000).</p>
+          <button class="e-btn e-btn-green" style="width:100%;margin-bottom:10px" onclick="scNewSpell()">＋ New Spell</button>
+          <div id="sc-list" style="max-height:52vh;overflow-y:auto"></div>
+          <div style="margin:12px 0 6px;border-top:1px solid var(--border)"></div>
+          <button class="e-btn" style="width:100%;font-size:0.78rem" onclick="scRebuildMpq(this)"
+            title="Writes custom spells into a client Spell.dbc and (re)builds the MPQ patch so they render client-side (icon, cast, visual, tooltip).">🔁 Rebuild MPQ (client-side)</button>
+        </aside>
+
+        <div class="editor-main">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+            <span class="entry-badge" id="sc-entry-badge">New ID will be assigned</span>
+            <span id="sc-status" style="color:var(--muted);font-size:0.78rem"></span>
+          </div>
+          <div id="sc-form"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── SPELL EASY-CREATE SCREEN (guided, beginner-friendly) ── -->
+    <div id="spell-editor-screen-easy" style="display:none">
+      <div style="padding:12px 0 0">
+        <button class="mode-back-btn" onclick="scEasyBack()">← Switch mode</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;margin:6px 0 12px;flex-wrap:wrap">
+        <span class="mode-badge" style="background:rgba(105,204,240,.15);border:1px solid #69ccf0;color:#69ccf0;padding:4px 10px;border-radius:5px">🟢 Easy Spell Creator</span>
+        <span id="sc-easy-status" style="color:var(--muted);font-size:0.78rem"></span>
+      </div>
+      <div class="editor-layout">
+        <aside class="editor-sidebar">
+          <h3>✨ Custom Spells</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin:6px 0">Self-created Spells (ID ≥ 5000000).</p>
+          <button class="e-btn e-btn-green" style="width:100%;margin-bottom:10px" onclick="scEasyNew()">＋ New Spell</button>
+          <div id="sc-easy-list" style="max-height:52vh;overflow-y:auto"></div>
+          <div style="margin:12px 0 6px;border-top:1px solid var(--border)"></div>
+          <button class="e-btn" style="width:100%;font-size:0.78rem" onclick="scRebuildMpq(this)"
+            title="Writes custom spells into a client Spell.dbc and (re)builds the MPQ patch so they render client-side (icon, cast, visual, tooltip).">🔁 Rebuild MPQ (client-side)</button>
+        </aside>
+        <div class="editor-main">
+          <div id="sc-easy"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="spell-editor-screen-editor" style="display:none">
+      <div class="editor-layout">
+        <aside class="editor-sidebar">
+          <div class="sidebar-search">
+            <input type="text" id="spell-search-input" placeholder="Spell ID or Name…" autocomplete="off">
+            <div id="spell-search-results" class="search-results-dropdown"></div>
+          </div>
+          <div class="sidebar-actions">
+            <button class="e-btn e-btn-gold" onclick="newSpellOverride()">＋ New Override</button>
+            <button class="e-btn" onclick="saveSpell()">💾 Save</button>
+            <button class="e-btn e-btn-danger" onclick="deleteSpell()">🗑 Delete override</button>
+          </div>
+          <div id="spell-dbc-info" style="display:none;margin-top:10px;background:var(--bg);border-radius:8px;padding:10px;font-size:0.75rem;">
+            <div id="spell-dbc-name" style="color:var(--cyan);font-weight:700;margin-bottom:4px;"></div>
+            <div id="spell-dbc-school" style="color:var(--muted);margin-bottom:4px;"></div>
+            <div id="spell-dbc-desc" style="color:var(--muted);font-style:italic;line-height:1.4;"></div>
+          </div>
+        </aside>
+        <main class="editor-main">
+          <div class="editor-topbar">
+            <div id="spell-entry-badge" class="entry-badge">No Spell loaded</div>
+            <div id="spell-dirty" class="dirty-indicator" style="display:none">● Unsaved</div>
+            <div class="editor-toolbar">
+              <button class="e-btn e-btn-small" onclick="goToSpellLanding()">← Mode</button>
+            </div>
+          </div>
+          <div id="spell-editor-form" class="editor-form">
+            <p style="color:var(--muted);font-size:0.85rem;text-align:center;padding:40px 0">Enter spell ID or search by name.</p>
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+  <!-- ── CREATURE EDITOR ── -->
+  <div class="sub-page" id="editor-creatures">
+    <div id="creature-editor-screen-landing">
+      <div class="page-title">
+        <span class="pt-icon">🐉</span>
+        <div><h2 style="color:var(--orange)">Creature Editor</h2><p>creature_template · Stats · AI · Faction · Loot · Spells</p></div>
+      </div>
+      <div class="mode-select-screen">
+        <h3>Choose your Edit-Mode</h3>
+        <div class="mode-cards">
+          <div class="mode-card mode-easy" onclick="openCreatureEditor('easy')">
+            <div class="mode-card-icon">🟢</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title">Easy Edit</div>
+              <div class="mode-card-desc">Name, Level, Faction, Flags, HP mods and Loot — the basics.</div>
+              <div class="mode-card-fields">Name · Level · Faction · npcflag · HP/Mana-Mod · Loot · AI</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+          <div class="mode-card mode-edit" onclick="openCreatureEditor('full')">
+            <div class="mode-card-icon">🟡</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title">Full Edit</div>
+              <div class="mode-card-desc">All creature_template fields: Stats, Spells, Vehicle, AI, Movement.</div>
+              <div class="mode-card-fields">All fields + Spells 1–8 + Vehicle + ScriptName</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+          <div class="mode-card mode-create" onclick="openCreatureCreateMode()" style="border-color:#1eff00">
+            <div class="mode-card-icon">✨</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title" style="color:#1eff00">Create</div>
+              <div class="mode-card-desc">Create new NPCs — display reuse, templates for Vendor/Trainer/Mob/Boss.</div>
+              <div class="mode-card-fields">Auto-ID ≥ 90000 · creature_template + creature_template_model</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+        </div>
+        <p style="color:var(--muted);font-size:0.78rem;margin-top:16px;">⚠️ Entry &lt; 100000 cannot be deleted (Blizzard originals). Custom creatures (≥90000) → Create mode.</p>
+      </div>
+    </div>
+
+    <!-- ── CREATURE CREATE SCREEN ── -->
+    <div id="creature-editor-screen-create" style="display:none">
+      <div style="padding:12px 0 0">
+        <button class="mode-back-btn" onclick="ccBack()">← Switch mode</button>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <span class="mode-badge" style="background:rgba(30,255,0,.15);border:1px solid #1eff00;color:#1eff00;padding:4px 10px;border-radius:5px">✨ Creature Create Mode</span>
+      </div>
+
+      <div class="editor-layout">
+        <aside class="editor-sidebar">
+          <h3>✨ Custom Creatures</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin:6px 0">Self-created NPCs (Entry ≥ 90000).</p>
+          <button class="e-btn e-btn-green" style="width:100%;margin-bottom:10px" onclick="ccNewCreature()">＋ New Creature</button>
+          <div id="cc-list" style="max-height:60vh;overflow-y:auto"></div>
+        </aside>
+
+        <div class="editor-main">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+            <span class="entry-badge" id="cc-entry-badge">New ID will be assigned</span>
+            <span id="cc-status" style="color:var(--muted);font-size:0.78rem"></span>
+          </div>
+          <div id="cc-form"></div>
+        </div>
+      </div>
+    </div>
+    <div id="creature-editor-screen-editor" style="display:none">
+      <div class="editor-layout">
+        <aside class="editor-sidebar">
+          <div class="sidebar-search">
+            <input type="text" id="creature-search-input" placeholder="Entry ID or Name…" autocomplete="off">
+            <div id="creature-search-results" class="search-results-dropdown"></div>
+          </div>
+          <div class="sidebar-actions">
+            <button class="e-btn e-btn-gold" onclick="newCreature()">＋ New Template</button>
+            <button class="e-btn" onclick="saveCreature()">💾 Save</button>
+            <button class="e-btn e-btn-danger" onclick="deleteCreature()">🗑 Delete</button>
+            <button class="e-btn" onclick="openNpcExtras()" id="creature-npc-extras-btn" style="display:none;border-color:var(--orange);color:var(--orange)">🐉 NPC Extras</button>
+          </div>
+        </aside>
+        <main class="editor-main">
+          <div class="editor-topbar">
+            <div id="creature-entry-badge" class="entry-badge">No Creature loaded</div>
+            <div id="creature-dirty" class="dirty-indicator" style="display:none">● Unsaved</div>
+            <div class="editor-toolbar">
+              <button class="e-btn e-btn-small" onclick="goToCreatureLanding()">← Mode</button>
+            </div>
+          </div>
+          <div id="creature-editor-form" class="editor-form">
+            <p style="color:var(--muted);font-size:0.85rem;text-align:center;padding:40px 0">Search creature or enter an entry.</p>
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+  <!-- ── QUEST EDITOR ── -->
+  <div class="sub-page" id="editor-quests">
+    <div id="quest-editor-screen-landing">
+      <div class="page-title">
+        <span class="pt-icon">📜</span>
+        <div><h2 style="color:var(--green)">Quest Editor</h2><p>quest_template · quest_template_addon · Objectives · Rewards</p></div>
+      </div>
+      <div class="mode-select-screen">
+        <h3>Choose your Edit-Mode</h3>
+        <div class="mode-cards">
+          <div class="mode-card mode-easy" onclick="openQuestEditor('easy')">
+            <div class="mode-card-icon">🟢</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title">Easy Edit</div>
+              <div class="mode-card-desc">Title, texts, level and rewards — quick editing.</div>
+              <div class="mode-card-fields">Title · Description · Level · XP · Gold · Item rewards</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+          <div class="mode-card mode-edit" onclick="openQuestEditor('full')">
+            <div class="mode-card-icon">🟡</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title">Full Edit</div>
+              <div class="mode-card-desc">All fields: Objectives, Flags, Reputation, Spells, Scripts, Addon.</div>
+              <div class="mode-card-fields">All quest_template + quest_template_addon fields</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+          <div class="mode-card mode-create" onclick="openQuestCreateMode()" style="border-color:#1eff00">
+            <div class="mode-card-icon">✨</div>
+            <div class="mode-card-body">
+              <div class="mode-card-title" style="color:#1eff00">Create</div>
+              <div class="mode-card-desc">Create new quests — templates for Kill, Gather, Daily, Escort, Group.</div>
+              <div class="mode-card-fields">Auto-ID ≥ 70000 · quest_template + quest_template_addon</div>
+            </div>
+            <div class="mode-card-arrow">→</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── QUEST CREATE SCREEN ── -->
+    <div id="quest-editor-screen-create" style="display:none">
+      <div style="padding:12px 0 0">
+        <button class="mode-back-btn" onclick="qcBack()">← Switch mode</button>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <span class="mode-badge" style="background:rgba(30,255,0,.15);border:1px solid #1eff00;color:#1eff00;padding:4px 10px;border-radius:5px">✨ Quest Create Mode</span>
+      </div>
+
+      <div class="editor-layout">
+        <aside class="editor-sidebar">
+          <h3>✨ Custom Quests</h3>
+          <p style="font-size:0.72rem;color:var(--muted);margin:6px 0">Self-created Quests (ID ≥ 70000).</p>
+          <button class="e-btn e-btn-green" style="width:100%;margin-bottom:10px" onclick="qcNewQuest()">＋ New Quest</button>
+          <div id="qc-list" style="max-height:60vh;overflow-y:auto"></div>
+        </aside>
+
+        <div class="editor-main">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+            <span class="entry-badge" id="qc-entry-badge">New ID will be assigned</span>
+            <span id="qc-status" style="color:var(--muted);font-size:0.78rem"></span>
+          </div>
+          <div id="qc-form"></div>
+        </div>
+      </div>
+    </div>
+    <div id="quest-editor-screen-editor" style="display:none">
+      <div class="editor-layout">
+        <aside class="editor-sidebar">
+          <div class="sidebar-search">
+            <input type="text" id="quest-search-input" placeholder="Quest ID or title…" autocomplete="off">
+            <div id="quest-search-results" class="search-results-dropdown"></div>
+          </div>
+          <div class="sidebar-actions">
+            <button class="e-btn e-btn-gold" onclick="newQuest()">＋ New Quest</button>
+            <button class="e-btn" onclick="saveQuest()">💾 Save</button>
+            <button class="e-btn e-btn-danger" onclick="deleteQuest()">🗑 Delete</button>
+          </div>
+        </aside>
+        <main class="editor-main">
+          <div class="editor-topbar">
+            <div id="quest-entry-badge" class="entry-badge">No Quest loaded</div>
+            <div id="quest-dirty" class="dirty-indicator" style="display:none">● Unsaved</div>
+            <div class="editor-toolbar">
+              <button class="e-btn e-btn-small" onclick="goToQuestLanding()">← Mode</button>
+            </div>
+          </div>
+          <div id="quest-editor-form" class="editor-form">
+            <p style="color:var(--muted);font-size:0.85rem;text-align:center;padding:40px 0">Search quest or enter an ID.</p>
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+  <!-- ── LOOT EDITOR ── -->
+  <div class="sub-page" id="editor-loot">
+    <div class="page-title">
+      <span class="pt-icon">🎲</span>
+      <div><h2 style="color:var(--gold)">Loot Editor</h2><p>creature · item · gameobject · skinning · pickpocket · fishing · disenchant · spell · mail · reference</p></div>
+    </div>
+    <div id="loot-editor-content" style="padding-top:4px"></div>
+  </div>
+
+  <!-- ── SMART AI EDITOR ── -->
+  <div class="sub-page" id="editor-smartai">
+    <div class="page-title">
+      <span class="pt-icon">🤖</span>
+      <div><h2 style="color:var(--cyan)">SmartAI Editor</h2><p>smart_scripts · Event / Action / Target</p></div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px">
+      <select id="sai-source-select"
+        style="background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:'Share Tech Mono',monospace;font-size:0.85rem;padding:7px 10px">
+        <option value="0">Creature Template</option>
+        <option value="1">Creature GUID (Spawn)</option>
+        <option value="2">GameObject Template</option>
+        <option value="3">GameObject GUID</option>
+        <option value="9">Areatrigger</option>
+      </select>
+      <input id="sai-entry-input" type="number" placeholder="Entry / GUID…"
+        style="width:150px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:'Share Tech Mono',monospace;font-size:0.85rem;padding:7px 10px"
+        onkeydown="if(event.key==='Enter')loadSmartAI()">
+      <button class="e-btn" onclick="loadSmartAI()">🔍 Load</button>
+    </div>
+    <div id="sai-content">
+      <div style="color:var(--muted);text-align:center;padding:40px 0;font-size:0.85rem">Enter source type and entry → click Load</div>
+    </div>
+  </div>
+
+  <!-- ── TALENT EDITOR ── -->
+  <div class="sub-page" id="editor-talents">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
+      <div>
+        <h2 style="color:var(--gold);margin:0">🌟 Talent Editor</h2>
+        <p style="color:var(--muted);font-size:0.8rem;margin:4px 0 0">Edit a class's 3 talent trees. <b>Save + Patch</b> writes <code>Talent.dbc</code> to the server's <code>data/dbc</code> (one-time <code>.bak</code>) and rebuilds the client MPQ. Server restart needed to take effect.</p>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="talent-status" style="color:var(--muted);font-size:0.78rem"></span>
+        <button class="e-btn e-btn-green" onclick="talentSavePatch(this)">💾 Save + Patch</button>
+      </div>
+    </div>
+    <div id="talent-classbar" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px"></div>
+    <div id="talent-book"><div style="color:var(--muted);text-align:center;padding:40px 0">Loading…</div></div>
+  </div>
+

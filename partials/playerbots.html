@@ -1,0 +1,73 @@
+
+  <nav class="sub-nav">
+    <button class="sub-nav-btn active" onclick="showSub('playerbots','texts',this);pbInit('texts')">💬 Texts</button>
+    <button class="sub-nav-btn" onclick="showSub('playerbots','speech',this);pbInit('speech')">📢 Speech</button>
+    <button class="sub-nav-btn" onclick="showSub('playerbots','gear',this);pbInit('gear')">🛡 Gear</button>
+    <button class="sub-nav-btn" onclick="showSub('playerbots','enchants',this);pbInit('enchants')">✨ Enchants</button>
+    <button class="sub-nav-btn" onclick="showSub('playerbots','weights',this);pbInit('weights')">⚖ Weights</button>
+    <button class="sub-nav-btn" onclick="showSub('playerbots','strategies',this);pbInit('strategies')">🧠 Strategies</button>
+    <button class="sub-nav-btn" onclick="showSub('playerbots','dungeons',this);pbInit('dungeons')">🏰 Dungeons</button>
+  </nav>
+
+  <!-- ── TEXTS ── -->
+  <div class="sub-page active" id="playerbots-texts">
+    <div class="page-title">
+      <span class="pt-icon">💬</span>
+      <div><h2 style="color:var(--cyan)">Bot Texts</h2><p>ai_playerbot_texts · ai_playerbot_texts_chance — what bots say, with trigger chance &amp; localizations</p></div>
+    </div>
+    <div id="pb-texts-content"><div class="pb-loading">Loading…</div></div>
+  </div>
+
+  <!-- ── SPEECH ── -->
+  <div class="sub-page" id="playerbots-speech">
+    <div class="page-title">
+      <span class="pt-icon">📢</span>
+      <div><h2 style="color:var(--gold)">Speech (Say / Yell)</h2><p>playerbots_speech · playerbots_speech_probability — taunts &amp; combat one-liners</p></div>
+    </div>
+    <div id="pb-speech-content"><div class="pb-loading">Loading…</div></div>
+  </div>
+
+  <!-- ── GEAR ── -->
+  <div class="sub-page" id="playerbots-gear">
+    <div class="page-title">
+      <span class="pt-icon">🛡</span>
+      <div><h2 style="color:var(--orange)">BiS Gear</h2><p>playerbots_bis_gear — best-in-slot per class / spec / phase</p></div>
+    </div>
+    <div id="pb-gear-content"><div class="pb-loading">Loading…</div></div>
+  </div>
+
+  <!-- ── ENCHANTS ── -->
+  <div class="sub-page" id="playerbots-enchants">
+    <div class="page-title">
+      <span class="pt-icon">✨</span>
+      <div><h2 style="color:var(--green)">Enchants</h2><p>playerbots_enchants — preferred enchants per class / spec / slot</p></div>
+    </div>
+    <div id="pb-enchants-content"><div class="pb-loading">Loading…</div></div>
+  </div>
+
+  <!-- ── WEIGHT SCALES ── -->
+  <div class="sub-page" id="playerbots-weights">
+    <div class="page-title">
+      <span class="pt-icon">⚖</span>
+      <div><h2 style="color:var(--cyan)">Stat Weight Scales</h2><p>playerbots_weightscales · playerbots_weightscale_data — how bots value each stat</p></div>
+    </div>
+    <div id="pb-weights-content"><div class="pb-loading">Loading…</div></div>
+  </div>
+
+  <!-- ── STRATEGIES ── -->
+  <div class="sub-page" id="playerbots-strategies">
+    <div class="page-title">
+      <span class="pt-icon">🧠</span>
+      <div><h2 style="color:var(--gold)">Custom Strategies</h2><p>playerbots_custom_strategy — trigger &gt; action rules</p></div>
+    </div>
+    <div id="pb-strategies-content"><div class="pb-loading">Loading…</div></div>
+  </div>
+
+  <!-- ── DUNGEONS ── -->
+  <div class="sub-page" id="playerbots-dungeons">
+    <div class="page-title">
+      <span class="pt-icon">🏰</span>
+      <div><h2 style="color:var(--orange)">Dungeon Suggestions</h2><p>playerbots_dungeon_suggestion_definition — instances bots suggest by level</p></div>
+    </div>
+    <div id="pb-dungeons-content"><div class="pb-loading">Loading…</div></div>
+  </div>

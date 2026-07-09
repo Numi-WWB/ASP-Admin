@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ASP Admin</title>
+<link rel="stylesheet" href="/css/main.css">
+<!-- WoWHead tooltips for spell icons (3.3.5 = wotlk) -->
+<script>const whTooltips = {colorLinks:false,iconSize:'medium',rename:false,hideLinks:true};</script>
+<script src="https://wow.zamimg.com/widgets/power.js"></script>
+</head>
+<body>
+
+<header>
+  <h1>⚔ ASP Admin <span style="font-size:0.55em;font-weight:400;color:var(--muted);margin-left:8px;">Total <span id="header-total" style="color:var(--gold)">—</span> <span style="font-size:0.85em;color:var(--muted)">(World Ø)</span></span></h1>
+  <p>3.3.5 Build 12340 · WORLD_SCHEMA 321 Tables · DB-Browser v4 · March 2026</p>
+</header>
+
+<!-- MAIN NAV -->
+<nav class="main-nav">
+  <button class="main-nav-btn active" onclick="showDB('world',this)">🌍 World <span class="progress-badge pb-good">73%</span></button>
+  <button class="main-nav-btn" onclick="showDB('characters',this)">👤 Characters <span class="progress-badge" style="background:var(--green);color:#000">Live</span></button>
+  <button class="main-nav-btn" onclick="showDB('player',this); initPlayerModule();">⚔️ Player</button>
+  <button class="main-nav-btn" onclick="showDB('editor',this); initEditor();">✏️ Editor</button>
+  <button class="main-nav-btn" onclick="showDB('playerbots',this)">🤖 Playerbots <span class="progress-badge pb-low">2%</span></button>
+  <button class="main-nav-btn" onclick="showDB('auth',this);initAuthModule();">🔑 Auth <span class="progress-badge" style="background:var(--cyan);color:#000">Live</span></button>
+</nav>
+
+<div class="content-area">
+  <!-- Per-tab markup is injected here from partials/ by bootstrap.js -->
+  <div class="db-section active" id="db-world"></div>
+  <div class="db-section" id="db-characters"></div>
+  <div class="db-section" id="db-player"></div>
+  <div class="db-section" id="db-playerbots"></div>
+  <div class="db-section" id="db-auth"></div>
+  <div class="db-section" id="db-editor"></div>
+</div>
+
+<footer>ASP Admin v10 · 3.3.5 Build 12340 · WORLD_SCHEMA 321 Tables · March 2026</footer>
+
+<!-- ── Shared (must load first) ── -->
+<script src="/js/shared/constants.js"></script>
+<script src="/js/shared/helpers.js"></script>
+<script src="/js/shared/item-display.js"></script>
+<script src="/js/shared/search-modals.js"></script>
+<script src="/js/shared/nav.js"></script>
+
+<!-- ── Editor tab ── -->
+<script src="/js/editor/item-editor.js"></script>
+<script src="/js/editor/item-creator.js"></script>
+<script src="/js/editor/dbc-editor.js"></script>
+<script src="/js/editor/spell-creator.js"></script>
+<script src="/js/editor/spell-creator-easy.js"></script>
+<script src="/js/editor/talent-editor.js"></script>
+<script src="/js/editor/creature-creator.js"></script>
+<script src="/js/editor/quest-creator.js"></script>
+<script src="/js/editor/spell-editor.js"></script>
+<script src="/js/editor/quest-editor.js"></script>
+<script src="/js/editor/creature-editor.js"></script>
+<script src="/js/editor/loot-editor.js"></script>
+<script src="/js/editor/smartai-editor.js"></script>
+
+<!-- ── Player tab ── -->
+<script src="/js/player/player.js"></script>
+<script src="/js/player/xp.js"></script>
+<script src="/js/player/classes.js"></script>
+<script src="/js/player/races.js"></script>
+<script src="/js/player/create-info.js"></script>
+<script src="/js/player/create-items.js"></script>
+<script src="/js/player/create-spells.js"></script>
+
+<!-- ── Characters / Auth / misc ── -->
+<script src="/js/characters.js"></script>
+<script src="/js/accounts.js"></script>
+<script src="/js/npc-extras.js"></script>
+<script src="/js/guilds.js"></script>
+<script src="/js/auth.js"></script>
+
+<!-- ── Playerbots (acore_playerbots content) ── -->
+<script src="/js/playerbots.js"></script>
+
+<!-- ── Router: deep-linkable /Tab/Sub URLs (before bootstrap) ── -->
+<script src="/js/router.js"></script>
+
+<!-- ── Bootstrap: inject partials, then fire app:ready (LAST) ── -->
+<script src="/js/bootstrap.js"></script>
+
+</body>
+</html>

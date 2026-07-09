@@ -1,0 +1,54 @@
+
+  <!-- ── CHARACTER SEARCH LANDING ───────────────────── -->
+  <div id="char-landing" style="padding:20px 0 16px">
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:16px">
+      <input id="char-search-input" placeholder="Search name, GUID or account…"
+        style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;
+               color:var(--text);font-family:'Share Tech Mono',monospace;font-size:0.85rem;
+               padding:8px 12px;outline:none"
+        oninput="charSearchDebounce()"
+        onkeydown="if(event.key==='Enter')searchCharacters()">
+      <button class="e-btn" onclick="searchCharacters()">🔍 Search</button>
+    </div>
+    <div id="char-search-results" style="display:none"></div>
+    <!-- Account search toggle -->
+    <div style="margin-top:18px;border-top:1px solid var(--border);padding-top:14px">
+      <div style="font-size:0.72rem;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">Account Search</div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <input id="acct-search-input" placeholder="Username or email…"
+          style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;
+                 color:var(--text);font-family:'Share Tech Mono',monospace;font-size:0.85rem;
+                 padding:8px 12px;outline:none"
+          onkeydown="if(event.key==='Enter')searchAccounts()">
+        <button class="e-btn" onclick="searchAccounts()">🔍</button>
+      </div>
+      <div id="acct-search-results" style="display:none;margin-top:10px"></div>
+    </div>
+    <!-- Guild search -->
+    <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
+      <div style="font-size:0.72rem;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px">Guild Search</div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <input id="guild-search-input" placeholder="Guild name or ID…"
+          style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;
+                 color:var(--text);font-family:'Share Tech Mono',monospace;font-size:0.85rem;
+                 padding:8px 12px;outline:none"
+          onkeydown="if(event.key==='Enter')searchGuilds()">
+        <button class="e-btn" onclick="searchGuilds()">🔍</button>
+      </div>
+      <div id="guild-search-results" style="display:none;margin-top:10px"></div>
+    </div>
+  </div>
+
+  <!-- ── CHARACTER DETAIL VIEW ───────────────────────── -->
+  <div id="char-detail" style="display:none">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+      <button class="mode-back-btn" onclick="goToCharLanding()">← Back</button>
+      <span id="char-detail-badge" style="font-size:0.9rem;font-weight:600;color:var(--gold)"></span>
+      <span id="char-dirty" style="display:none;font-size:0.72rem;color:var(--orange);margin-left:4px">● unsaved</span>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="e-btn" onclick="saveCharacter()" style="background:rgba(100,200,100,.12);border-color:var(--green)">💾 Save</button>
+      </div>
+    </div>
+    <div id="char-detail-form"></div>
+  </div>
+
