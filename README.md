@@ -42,8 +42,6 @@ Join the ASP community discord https://discord.gg/wvdjmC3eab
 - XP curve, Class/Race stats
 
 ## What's broken
-
-- WORLD tab graphics are not updated.
 - Quest creator fails in you pick all classes / races
 
 ## Notes
