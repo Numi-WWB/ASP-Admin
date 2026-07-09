@@ -1,6 +1,7 @@
 # ASP Admin
 
 Browser-based admin tool for AzerothCore 3.3.5a private servers (ASP).
+
 Made in / for https://github.com/kadeshar/ASP/releases
 
 Join the ASP community discord https://discord.gg/wvdjmC3eab
