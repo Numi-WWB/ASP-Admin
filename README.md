@@ -26,6 +26,7 @@ Join the ASP community discord https://discord.gg/wvdjmC3eab
 - Items
 - Spells
 - Talents
+- Glyphs
 - Start Spells (Only same class spells can be added)
 - Creatures
 - Quests
