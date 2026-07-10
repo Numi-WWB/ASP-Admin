@@ -8,7 +8,7 @@
     world:      { name: 'World',      kind: 'sub',    subs: { items:'Items', spells:'Spells', quests:'Quests', creatures:'Creatures', misc:'Misc' } },
     characters: { name: 'Characters', kind: 'none',   subs: null },
     player:     { name: 'Player',     kind: 'player', subs: { xp:'XP', class:'Classes', race:'Races', create:'Character', items:'Items', spells:'Spells' } },
-    editor:     { name: 'Editor',     kind: 'sub',    subs: { items:'Items', spells:'Spells', talents:'Talents', creatures:'Creatures', quests:'Quests', loot:'Loot', smartai:'SmartAI' } },
+    editor:     { name: 'Editor',     kind: 'sub',    subs: { items:'Items', spells:'Spells', talents:'Talents', glyphs:'Glyphs', creatures:'Creatures', quests:'Quests', loot:'Loot', smartai:'SmartAI' } },
     playerbots: { name: 'Playerbots', kind: 'sub',    subs: { texts:'Texts', speech:'Speech', gear:'Gear', enchants:'Enchants', weights:'Weights', strategies:'Strategies', dungeons:'Dungeons' } },
     auth:       { name: 'Auth',       kind: 'none',   subs: null },
   };

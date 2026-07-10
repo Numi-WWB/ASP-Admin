@@ -3,6 +3,7 @@
     <button class="sub-nav-btn active" onclick="showSub('editor','items',this)">📦 Items</button>
     <button class="sub-nav-btn" onclick="showSub('editor','spells',this)">🔮 Spells</button>
     <button class="sub-nav-btn" onclick="showSub('editor','talents',this);initTalentEditor()">🌟 Talents</button>
+    <button class="sub-nav-btn" onclick="showSub('editor','glyphs',this);initGlyphEditor()">📖 Glyphs</button>
     <button class="sub-nav-btn" onclick="showSub('editor','creatures',this)">🐉 Creatures</button>
     <button class="sub-nav-btn" onclick="showSub('editor','quests',this)">📜 Quests</button>
     <button class="sub-nav-btn" onclick="showSub('editor','loot',this);initLootEditor()">🎲 Loot</button>
@@ -541,5 +542,42 @@
     </div>
     <div id="talent-classbar" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px"></div>
     <div id="talent-book"><div style="color:var(--muted);text-align:center;padding:40px 0">Loading…</div></div>
+  </div>
+
+  <!-- ── GLYPHS EDITOR ── -->
+  <div class="sub-page" id="editor-glyphs">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px">
+      <div>
+        <h2 style="color:var(--gold);margin:0">📖 Glyph Editor</h2>
+        <p style="color:var(--muted);font-size:0.8rem;margin:4px 0 0">
+          Edit glyphs per class. Pick a class and <b>Major</b> or <b>Minor</b>, click a glyph on the left to edit it,
+          or create a new one with <b>➕ Add Glyph</b>. <b>💾 Save + Patch</b> writes <code>GlyphProperties.dbc</code> to
+          <code>data/dbc</code> (one-time <code>.bak</code>) and rebuilds the client MPQ. Server restart needed to take effect.
+        </p>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="glyph-status" style="color:var(--muted);font-size:0.78rem"></span>
+        <button class="e-btn" onclick="glyphOpenCreate()">➕ Add Glyph</button>
+        <button class="e-btn" onclick="glyphRepairBots(this)" title="Reset invalid glyph ids in character_glyphs (incl. bots) to 0">🤖 Repair Bots</button>
+      </div>
+    </div>
+
+    <!-- class bar -->
+    <div id="glyph-classbar" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px"></div>
+    <!-- major / minor toggle -->
+    <div id="glyph-typebar" style="display:flex;gap:8px;margin-bottom:14px">
+      <button id="glyph-type-major" class="e-btn e-btn-green" onclick="glyphSelectType('major')">🔷 Major Glyphs</button>
+      <button id="glyph-type-minor" class="e-btn" onclick="glyphSelectType('minor')">🔸 Minor Glyphs</button>
+    </div>
+
+    <!-- list (left) + editor (right) -->
+    <div class="editor-layout">
+      <aside class="editor-sidebar">
+        <div id="glyph-list"><div style="color:var(--muted);text-align:center;padding:40px 0">Pick a class…</div></div>
+      </aside>
+      <div class="editor-main">
+        <div id="glyph-editor"><div style="color:var(--muted);text-align:center;padding:60px 0">← Pick a glyph on the left, or click "➕ Add Glyph".</div></div>
+      </div>
+    </div>
   </div>
 

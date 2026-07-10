@@ -19,7 +19,7 @@
   function _open(title, placeholder) {
     document.getElementById('shared-search-modal')?.remove();
     const m = `<div id="shared-search-modal" onclick="if(event.target===this)closeSharedSearch()"
-      style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:960;display:flex;align-items:flex-start;justify-content:center;padding:60px 20px">
+      style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:5000;display:flex;align-items:flex-start;justify-content:center;padding:60px 20px">
       <div style="background:var(--panel);border:1px solid var(--cyan);border-radius:10px;width:580px;max-width:100%;max-height:75vh;display:flex;flex-direction:column;padding:16px;position:relative">
         <button onclick="closeSharedSearch()" style="position:absolute;top:10px;right:12px;background:none;border:none;color:var(--muted);font-size:1.2rem;cursor:pointer">✕</button>
         <div style="font-size:0.95rem;font-weight:600;color:var(--cyan);margin-bottom:10px">${title}</div>

@@ -5645,6 +5645,1083 @@ def talent_save():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Glyph Editor — edits GlyphProperties.dbc (4 int fields: ID, SpellID, GlyphSlotFlags,
+# SpellIconID). Like talents, glyphs are DBC-driven: the CLIENT reads GlyphProperties.dbc
+# to know which spell/icon a glyph socket applies, so "Save + Patch" writes the server
+# data/dbc (one-time .bak) AND the client MPQ patch — same pipeline as Talent.dbc.
+#
+# A glyph has no name field of its own. The displayed name comes from the glyph ITEM
+# (item_template class=16, subclass=class-number, AllowableClass=class-mask) and from the
+# effect SPELL (GlyphProperties.SpellID). The glyph item's on-use spell has effect 74
+# (SPELL_EFFECT_APPLY_GLYPH) whose misc value = the GlyphProperties.ID → that link gives
+# us class + item-name + item per glyph.
+#
+# Major vs Minor: GlyphSlotFlags bit 0 → Minor (verified: e.g. GP 431 → spell 57856
+# "Glyph of Aquatic Form", a Druid minor glyph, has flags=1). Everything else = Major.
+#
+# Playerbots reference glyphs by GlyphProperties.ID in acore_characters.character_glyphs
+# (bots ARE characters). Renaming does not affect them (id-based). We expose a usage count
+# and a repair endpoint that clears now-invalid ids so bots don't hold dangling references.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_GLYPH_CUSTOM_MIN_ID    = 6000    # custom GlyphProperties IDs start here (vanilla ids stay < ~900)
+_GLYPH_ITEM_MIN_ID      = 90000   # custom glyph items (must be >= _CREATE_ITEM_MIN_ID = 60000)
+_GLYPH_ITEM_DISPLAYID   = 58828   # generic glyph scroll model (from "Glyph of Mangle")
+SPELL_EFFECT_APPLY_GLYPH = 74
+
+_GLYPH_ITEM_INDEX = None          # {glyphPropertiesId: {classMask,itemEntry,itemName,displayid,classNum}}
+
+def _glyph_class_mask(subclass, allowable):
+    """Resolve a glyph item's player-class MASK. AllowableClass is already a bitmask when it
+    names a single class; otherwise fall back to the item subclass (1=Warrior … 11=Druid)."""
+    valid = {c["mask"] for c in TALENT_CLASSES}
+    a = int(allowable or 0)
+    if a in valid:
+        return a
+    sc = int(subclass or 0)
+    if 1 <= sc <= 11 and sc != 10:      # 10 = Monk, not present in WotLK
+        return 1 << (sc - 1)
+    return 0
+
+def _mask_to_classnum(mask):
+    """Class MASK (1,2,4,…,1024) → item subclass number (1=Warrior … 11=Druid)."""
+    for n in range(0, 11):
+        if mask == (1 << n):
+            return n + 1
+    return 0
+
+def _read_glyph_dbc():
+    """GlyphProperties.dbc → [{id, spellId, flags, iconId, minor}] (read fresh each call)."""
+    data = open(_find_dbc("GlyphProperties.dbc"), "rb").read()
+    _, rc, fc, rs, sb = struct.unpack_from("<4sIIII", data, 0)
+    out = []
+    for i in range(rc):
+        v = struct.unpack_from("<4I", data, 20 + i * rs)
+        out.append({"id": v[0], "spellId": v[1], "flags": v[2], "iconId": v[3],
+                    "minor": bool(v[2] & 1)})
+    return out
+
+def _build_glyph_dbc_bytes(glyphs):
+    """Rebuild GlyphProperties.dbc bytes (4 int32 fields, empty string block), sorted by ID."""
+    fc, rs = 4, 16
+    body = bytearray()
+    for g in sorted(glyphs, key=lambda x: x["id"]):
+        for v in (g["id"], g.get("spellId", 0), g.get("flags", 0), g.get("iconId", 0)):
+            body += struct.pack("<I", int(v or 0) & 0xFFFFFFFF)
+    header = struct.pack("<4sIIII", b"WDBC", len(glyphs), fc, rs, 1)
+    return header + bytes(body) + b"\x00"
+
+def _glyph_item_index(force=False):
+    """Map GlyphProperties.ID → {classMask, classNum, itemEntry, itemName, displayid} by walking
+    the glyph items (item_template class=16): each item's on-use spell has an APPLY_GLYPH effect
+    whose misc value is the GlyphProperties.ID. Cached (glyph items rarely change at runtime)."""
+    global _GLYPH_ITEM_INDEX
+    if _GLYPH_ITEM_INDEX is not None and not force:
+        return _GLYPH_ITEM_INDEX
+    idx = {}
+    try:
+        rows = query("SELECT entry, name, subclass, AllowableClass, displayid, spellid_1, spellid_2 "
+                     "FROM item_template WHERE class = 16")
+    except Exception:
+        # DB unreachable (e.g. MySQL down) — return empty WITHOUT caching so it self-heals next call
+        return {}
+    for r in rows:
+        mask = _glyph_class_mask(r["subclass"], r["AllowableClass"])
+        for col in ("spellid_1", "spellid_2"):
+            learn = int(r.get(col) or 0)
+            if not learn:
+                continue
+            gpid = _learn_glyph_gpid(learn)
+            if gpid and gpid not in idx:
+                idx[gpid] = {"classMask": mask, "classNum": int(r["subclass"] or 0),
+                             "itemEntry": int(r["entry"]), "itemName": r["name"] or "",
+                             "displayid": int(r["displayid"] or 0)}
+    _GLYPH_ITEM_INDEX = idx
+    return idx
+
+def _learn_glyph_gpid(learn_id):
+    """The GlyphProperties id a glyph item's learn spell applies (its APPLY_GLYPH effect's misc
+    value), or 0. Checks the in-RAM Spell.dbc first, then the spell_dbc TABLE — custom glyph learn
+    spells (ID >= _SPELL_CREATE_MIN_ID) live only in the table, so without this fallback custom
+    glyphs get no class and vanish from the class-filtered list."""
+    sp = _DBC.get("Spell", {}).get(int(learn_id or 0))
+    if sp:
+        for n in (1, 2, 3):
+            if sp.get(f"effect_{n}") == SPELL_EFFECT_APPLY_GLYPH:
+                return int(sp.get(f"misc_val_{n}") or 0)
+        return 0
+    try:
+        row = query("SELECT Effect_1, Effect_2, Effect_3, EffectMiscValue_1, EffectMiscValue_2, "
+                    "EffectMiscValue_3 FROM spell_dbc WHERE ID = %s", [int(learn_id)], one=True)
+    except Exception:
+        row = None
+    if row:
+        for n in (1, 2, 3):
+            if int(row.get(f"Effect_{n}") or 0) == SPELL_EFFECT_APPLY_GLYPH:
+                return int(row.get(f"EffectMiscValue_{n}") or 0)
+    return 0
+
+def _spell_icon_num(spell_id):
+    """SpellIcon.dbc numeric id for a spell (for GlyphProperties.SpellIconID), or 0."""
+    sp = _DBC.get("Spell", {}).get(int(spell_id or 0))
+    return int(sp.get("icon_id", 0)) if sp else 0
+
+def _glyph_icon_name(icon_id):
+    """SpellIcon.dbc numeric id → wowhead icon name (lowercased path). '' if none."""
+    row = _DBC.get("SpellIcon", {}).get(int(icon_id or 0))
+    raw = (row.get("icon") or "").strip() if row else ""
+    if not raw:
+        return ""
+    low = raw.lower()
+    for pfx in ("interface\\icons\\", "interface/icons/"):
+        if low.startswith(pfx):
+            raw = raw[len(pfx):]; break
+    fname = raw.replace("\\", "_").replace("/", "_").replace(" ", "_").lower()
+    return "" if fname == "inv_misc_questionmark" else fname
+
+def _glyph_display_icon(spell_id, displayid=0):
+    """Best loadable icon for a glyph. Blizzard's hidden glyph aura spells nearly all use the
+    generic icon_id 1 ('trade_engineering'), so that source is useless for most glyphs. Prefer a
+    real effect-spell icon when present, else fall back to the glyph ITEM icon (a glyph scroll —
+    always resolves on wowhead and reads as a glyph), so the list never shows blank/broken boxes."""
+    d = _DBC_SPELL_DATA.get(int(spell_id or 0)) or {}
+    if int(d.get("icon_id", 0) or 0) > 1 and d.get("icon"):
+        return d["icon"]
+    if displayid:
+        ic = _DBC_ITEM_ICON_MAP.get(int(displayid), "")
+        if ic:
+            return ic
+    return ""
+
+def _glyph_usage_count(gid):
+    """How many characters (incl. playerbots) currently have this glyph socketed."""
+    try:
+        row = qchar("SELECT COUNT(*) AS n FROM character_glyphs "
+                    "WHERE %s IN (glyph1, glyph2, glyph3, glyph4, glyph5, glyph6)", [gid], one=True)
+        return int(row["n"]) if row else 0
+    except Exception:
+        return 0
+
+def _glyph_display_name(g, info):
+    """Best human name for a glyph: item name → effect-spell name → 'Glyph #id'."""
+    if info.get("itemName"):
+        return info["itemName"]
+    meta = _talent_spell_meta(g["spellId"])
+    if meta["name"]:
+        return meta["name"]
+    return f"Glyph #{g['id']}"
+
+def _write_glyph_dbc(glyphs):
+    """Write GlyphProperties.dbc to the server data/dbc (one-time .bak) + MPQ extras.
+    Returns (server_written, backup_created). Caller rebuilds the MPQ."""
+    import shutil
+    blob = _build_glyph_dbc_bytes(glyphs)
+    server_path = _find_dbc("GlyphProperties.dbc")
+    backed_up = False
+    if server_path and os.path.exists(server_path):
+        bak = server_path + ".bak"
+        if not os.path.exists(bak):
+            shutil.copy2(server_path, bak); backed_up = True
+        with open(server_path, "wb") as f:
+            f.write(blob)
+    extras_path = os.path.join(_mpq_extras_dir(), "DBFilesClient", "GlyphProperties.dbc")
+    os.makedirs(os.path.dirname(extras_path), exist_ok=True)
+    with open(extras_path, "wb") as f:
+        f.write(blob)
+    return bool(server_path), backed_up
+
+
+@app.route("/api/glyph/classes")
+def glyph_classes():
+    return ok(TALENT_CLASSES)
+
+
+@app.route("/api/glyph/list")
+def glyph_list():
+    """Glyphs for a class + type. class=<mask> (0 = all), type=major|minor."""
+    try:
+        mask   = int(request.args.get("class", 0) or 0)
+        gtype  = (request.args.get("type", "major") or "major").lower()
+        minor  = (gtype == "minor")
+        idx    = _glyph_item_index()
+        out = []
+        for g in _read_glyph_dbc():
+            if g["minor"] != minor:
+                continue
+            info  = idx.get(g["id"], {})
+            cmask = info.get("classMask", 0)
+            if mask and cmask != mask:
+                continue
+            meta = _talent_spell_meta(g["spellId"])
+            out.append({
+                "id": g["id"], "spellId": g["spellId"], "iconId": g["iconId"],
+                "minor": g["minor"], "classMask": cmask,
+                "name": _glyph_display_name(g, info),
+                "spellName": meta["name"], "icon": _glyph_display_icon(g["spellId"], info.get("displayid", 0)),
+                "itemEntry": info.get("itemEntry", 0),
+                "custom": g["id"] >= _GLYPH_CUSTOM_MIN_ID,
+            })
+        out.sort(key=lambda x: (x["name"] or "").lower())
+        return ok(out)
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.route("/api/glyph/<int:gid>")
+def glyph_get(gid):
+    """Full detail for one glyph incl. current bot/character usage count."""
+    try:
+        g = next((x for x in _read_glyph_dbc() if x["id"] == gid), None)
+        if not g:
+            return err("Glyph not found", 404)
+        info = _glyph_item_index().get(gid, {})
+        meta = _talent_spell_meta(g["spellId"])
+        return ok({
+            "id": g["id"], "spellId": g["spellId"], "iconId": g["iconId"],
+            "minor": g["minor"], "flags": g["flags"], "classMask": info.get("classMask", 0),
+            "itemEntry": info.get("itemEntry", 0), "itemName": info.get("itemName", ""),
+            "displayid": info.get("displayid", 0),
+            "name": _glyph_display_name(g, info),
+            "spellName": meta["name"], "icon": _glyph_display_icon(g["spellId"], info.get("displayid", 0)),
+            "usage": _glyph_usage_count(gid),
+            "custom": g["id"] >= _GLYPH_CUSTOM_MIN_ID,
+        })
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.route("/api/glyph/<int:gid>/usage")
+def glyph_usage(gid):
+    """Sample of characters (incl. playerbots) using this glyph — for the edit/delete warning."""
+    try:
+        n = _glyph_usage_count(gid)
+        sample = qchar("SELECT guid FROM character_glyphs "
+                       "WHERE %s IN (glyph1,glyph2,glyph3,glyph4,glyph5,glyph6) LIMIT 20", [gid])
+        return ok({"count": n, "guids": [r["guid"] for r in sample]})
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.route("/api/glyph/save", methods=["POST"])
+def glyph_save():
+    """Update one glyph (effect spell / icon / major-minor / name) → rewrite GlyphProperties.dbc
+    + MPQ. Renaming updates the glyph item name (server DB, no patch) and, when the effect spell
+    is a custom spell_dbc row, its name too."""
+    d = request.get_json() or {}
+    gid = int(d.get("id", 0))
+    if not gid:
+        return err("No glyph id given")
+    try:
+        glyphs = _read_glyph_dbc()
+        # ── Anti-wipe safety stop: a healthy GlyphProperties.dbc has hundreds of records ──
+        if len(glyphs) < 50 and not d.get("force"):
+            return err("Safety stop: GlyphProperties.dbc looks empty/half-loaded — not overwriting.")
+        target = next((g for g in glyphs if g["id"] == gid), None)
+        if not target:
+            return err("Glyph not found", 404)
+
+        if d.get("spellId") is not None:
+            target["spellId"] = int(d["spellId"])
+        if d.get("iconId") is not None:
+            target["iconId"] = int(d["iconId"])
+        if d.get("minor") is not None:
+            target["flags"] = (target["flags"] | 1) if d["minor"] else (target["flags"] & ~1)
+        target["minor"] = bool(target["flags"] & 1)
+
+        # ── Rename orchestration ──
+        renamed = {}
+        name = d.get("name")
+        if name is not None and str(name).strip():
+            name = str(name).strip()
+            item_entry = int(d.get("itemEntry") or 0)
+            if item_entry:
+                try:
+                    execute("UPDATE item_template SET name = %s WHERE entry = %s", [name, item_entry])
+                    renamed["item"] = True
+                except Exception as e:
+                    renamed["item_error"] = str(e)
+            sid = int(target["spellId"] or 0)
+            if sid:
+                try:
+                    if query("SELECT ID FROM spell_dbc WHERE ID = %s", [sid], one=True):
+                        execute("UPDATE spell_dbc SET Name_Lang_enUS = %s WHERE ID = %s", [name, sid])
+                        renamed["spell"] = True
+                except Exception:
+                    pass
+                # Patch the client Spell.dbc name too (field 136) so the in-game glyph panel shows
+                # the new name even for vanilla glyphs (whose effect spell isn't a custom spell_dbc row).
+                try:
+                    if int(sid) in _load_spell_dbc_raw()[1]:
+                        _patch_spell_dbc_fields(sid, str_values={_SPELL_NAME_FIELD: name})
+                        renamed["client_spell_name"] = True
+                except Exception:
+                    pass
+
+        server_written, backed_up = _write_glyph_dbc(glyphs)
+        mpq_path, copied, mpq_err = _build_item_patch_mpq()
+        _glyph_item_index(force=True)
+        return ok({"id": gid, "glyphs": len(glyphs), "renamed": renamed,
+                   "server_written": server_written, "backup_created": backed_up,
+                   "mpq_path": mpq_path, "copied_to_client": copied, "mpq_error": mpq_err})
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.route("/api/glyph/create", methods=["POST"])
+def glyph_create():
+    """Create a brand-new custom glyph: a GlyphProperties entry + a custom 'learn glyph' spell
+    (so the client/item can inscribe it) + a glyph item (so it is obtainable & learnable). The
+    effect spell (the glyph's actual aura) is an existing spell chosen by the user."""
+    d = request.get_json() or {}
+    class_mask = int(d.get("classMask", 0))
+    effect_spell = int(d.get("spellId", 0))
+    minor = bool(d.get("minor", False))
+    name = (d.get("name") or "").strip()
+    icon_id = int(d.get("iconId", 0)) or _spell_icon_num(effect_spell)
+    if not class_mask or not effect_spell or not name:
+        return err("classMask, spellId (effect spell) and name are required")
+    class_num = _mask_to_classnum(class_mask)
+    if not class_num:
+        return err("Invalid class")
+    try:
+        glyphs = _read_glyph_dbc()
+        new_gid = max([g["id"] for g in glyphs], default=0) + 1
+        if new_gid < _GLYPH_CUSTOM_MIN_ID:
+            new_gid = _GLYPH_CUSTOM_MIN_ID
+        while any(g["id"] == new_gid for g in glyphs):
+            new_gid += 1
+
+        # Effect-spell description → shown on the glyph item's in-bag tooltip (via the learn spell)
+        eff_desc = ""
+        try:
+            er = query("SELECT Description_Lang_enUS FROM spell_dbc WHERE ID = %s", [effect_spell], one=True)
+            if er and er.get("Description_Lang_enUS"):
+                eff_desc = er["Description_Lang_enUS"]
+        except Exception:
+            pass
+        if not eff_desc:
+            esp = _DBC.get("Spell", {}).get(effect_spell)
+            if esp:
+                eff_desc = _resolve_spell_vars(esp.get("desc", ""), effect_spell)
+
+        # 1) custom "learn glyph" spell (>= _SPELL_CREATE_MIN_ID) with an APPLY_GLYPH effect
+        row = query("SELECT MAX(ID) AS m FROM spell_dbc WHERE ID >= %s", [_SPELL_CREATE_MIN_ID], one=True)
+        learn_id = (row["m"] or _SPELL_CREATE_MIN_ID - 1) + 1
+        learn_cols = dict(_SPELL_DBC_DEFAULTS)
+        learn_cols.update({
+            "ID": learn_id, "Name_Lang_enUS": name, "Description_Lang_enUS": eff_desc,
+            "SpellIconID": icon_id,
+            "Effect_1": SPELL_EFFECT_APPLY_GLYPH, "EffectMiscValue_1": new_gid,
+            # Match Blizzard's real glyph learn spells (e.g. 54857) so the client shows the normal
+            # "select a glyph socket" flow + inscription cast bar instead of auto-applying.
+            "Attributes": 0x10000000, "CastingTimeIndex": 6, "SchoolMask": 1,
+        })
+        keys = list(learn_cols.keys()); vals = list(learn_cols.values())
+        execute(f"INSERT INTO spell_dbc ({','.join('`'+k+'`' for k in keys)}) "
+                f"VALUES ({','.join(['%s']*len(keys))}) "
+                f"ON DUPLICATE KEY UPDATE {','.join(f'`{k}`=VALUES(`{k}`)' for k in keys if k != 'ID')}",
+                vals)
+
+        # 2) glyph item (class 16) that teaches the glyph, modelled on a real glyph item
+        item_row = query("SELECT MAX(entry) AS m FROM item_template WHERE entry >= %s AND entry < %s",
+                         [_GLYPH_ITEM_MIN_ID, _GLYPH_ITEM_MIN_ID + 100000], one=True)
+        item_entry = (item_row["m"] or _GLYPH_ITEM_MIN_ID - 1) + 1
+        item_fields = {
+            "entry": item_entry, "class": 16, "subclass": class_num, "name": name,
+            "AllowableClass": class_mask, "Quality": 1, "bonding": 0, "Material": 4,
+            "displayid": _GLYPH_ITEM_DISPLAYID, "InventoryType": 0, "BagFamily": 16, "Flags": 64,
+            "RequiredLevel": 1, "spellid_1": learn_id, "spelltrigger_1": 0, "spellcharges_1": -1,
+        }
+        ik = list(item_fields.keys()); iv = list(item_fields.values())
+        execute(f"INSERT INTO item_template ({','.join('`'+k+'`' for k in ik)}) "
+                f"VALUES ({','.join(['%s']*len(ik))}) "
+                f"ON DUPLICATE KEY UPDATE {','.join(f'`{k}`=VALUES(`{k}`)' for k in ik if k != 'entry')}",
+                iv)
+        if not _ITEM_DBC_HEADER:
+            _load_item_dbc()
+        _item_dbc_add_or_update(item_id=item_entry, class_id=16, subclass_id=class_num,
+                                material=4, display_id=_GLYPH_ITEM_DISPLAYID, inv_type=0,
+                                sheathe=0, sound_override=-1)
+        _save_item_dbc()
+
+        # 3) GlyphProperties entry + DBC/MPQ patch
+        glyphs.append({"id": new_gid, "spellId": effect_spell, "flags": (1 if minor else 0),
+                       "iconId": icon_id, "minor": minor})
+        server_written, backed_up = _write_glyph_dbc(glyphs)
+        mpq_path, copied, mpq_err = _build_item_patch_mpq()
+        _glyph_item_index(force=True)
+
+        class_name = next((c["name"] for c in TALENT_CLASSES if c["mask"] == class_mask), "?")
+        bot_note = (
+            f"Playerbots pick glyphs hardcoded in the mod-playerbots C++ module "
+            f"(PlayerbotFactory::InitGlyphs). To let bots use this new glyph, add GlyphProperties "
+            f"ID {new_gid} (effect spell {effect_spell}) for {class_name} in InitGlyphs() and "
+            f"recompile the module. It cannot be enabled via the database alone.")
+        return ok({"glyphId": new_gid, "learnSpellId": learn_id, "itemEntry": item_entry,
+                   "classMask": class_mask, "minor": minor,
+                   "server_written": server_written, "backup_created": backed_up,
+                   "mpq_path": mpq_path, "copied_to_client": copied, "mpq_error": mpq_err,
+                   "playerbot_note": bot_note})
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.route("/api/glyph/delete", methods=["POST"])
+def glyph_delete():
+    """Delete a CUSTOM glyph (id >= _GLYPH_CUSTOM_MIN_ID): remove its GlyphProperties entry,
+    its glyph item, then rebuild the DBC/MPQ. Bots holding it are cleaned via repair-bots."""
+    d = request.get_json() or {}
+    gid = int(d.get("id", 0))
+    if gid < _GLYPH_CUSTOM_MIN_ID:
+        return err(f"Only custom glyphs (ID >= {_GLYPH_CUSTOM_MIN_ID}) can be deleted")
+    try:
+        glyphs = [g for g in _read_glyph_dbc() if g["id"] != gid]
+        info = _glyph_item_index().get(gid, {})
+        entry = info.get("itemEntry", 0)
+        if entry and entry >= _CREATE_ITEM_MIN_ID:
+            execute("DELETE FROM item_template WHERE entry = %s", [entry])
+            if not _ITEM_DBC_HEADER:
+                _load_item_dbc()
+            if _item_dbc_remove(entry):
+                _save_item_dbc()
+        server_written, backed_up = _write_glyph_dbc(glyphs)
+        mpq_path, copied, mpq_err = _build_item_patch_mpq()
+        _glyph_item_index(force=True)
+        return ok({"id": gid, "usage": _glyph_usage_count(gid),
+                   "mpq_path": mpq_path, "copied_to_client": copied, "mpq_error": mpq_err})
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.route("/api/glyph/repair-bots", methods=["POST"])
+def glyph_repair_bots():
+    """Clear glyph ids in character_glyphs that no longer exist in GlyphProperties (after a
+    delete/renumber) so playerbots/characters don't hold dangling references (client errors)."""
+    try:
+        valid = {g["id"] for g in _read_glyph_dbc()} | {0}
+        rows = qchar("SELECT guid, talentGroup, glyph1, glyph2, glyph3, glyph4, glyph5, glyph6 "
+                     "FROM character_glyphs")
+        fixed_rows = 0; cleared = 0
+        for r in rows:
+            updates = {}
+            for i in range(1, 7):
+                gv = r[f"glyph{i}"]
+                if gv and gv not in valid:
+                    updates[f"glyph{i}"] = 0; cleared += 1
+            if updates:
+                setclause = ",".join(f"{k}=%s" for k in updates)
+                exchar(f"UPDATE character_glyphs SET {setclause} WHERE guid=%s AND talentGroup=%s",
+                       list(updates.values()) + [r["guid"], r["talentGroup"]])
+                fixed_rows += 1
+        return ok({"fixed_rows": fixed_rows, "cleared_glyphs": cleared})
+    except Exception as e:
+        return err(str(e), 500)
+
+
+# ── Glyph EFFECT editor — edits what the glyph actually DOES ───────────────────
+# A glyph's effect spell (GlyphProperties.SpellID) is an aura that modifies another spell,
+# e.g. "Glyph of Battle" = APPLY_AURA / ADD_FLAT_MODIFIER / SpellModOp DURATION / +120000ms
+# (2 min on Battle Shout). These vanilla effect spells live only in the server's Spell.dbc file
+# (this repack has no `spell_template` override table), so to change what a glyph does we PATCH
+# the Spell.dbc record in place (server data/dbc, one-time .bak) + rebuild the client MPQ.
+# Field indices are from _DBC_SCHEMAS["Spell"] (this client's 234-field Spell.dbc).
+_SPELL_FX_FIELDS = {          # per-slot Spell.dbc field indices (slots 1,2,3)
+    "effect":   (71, 72, 73),
+    "aura":     (95, 96, 97),
+    "modop":    (110, 111, 112),   # EffectMiscValue = SpellModOp for ADD_*_MODIFIER auras
+    "base_pts": (80, 81, 82),      # stored as value-1
+}
+_SPELL_DBC_RAW = None          # cached (bytearray, {id: record_offset}, header tuple)
+
+def _s32(v):
+    v = int(v or 0)
+    return v if v < 0x80000000 else v - 0x100000000
+
+def _load_spell_dbc_raw(force=False):
+    """Load the server Spell.dbc into a cached bytearray + id→offset index (for in-place edits)."""
+    global _SPELL_DBC_RAW
+    if _SPELL_DBC_RAW is not None and not force:
+        return _SPELL_DBC_RAW
+    path = _find_dbc("Spell.dbc")
+    if not path:
+        raise RuntimeError("Spell.dbc not found")
+    data = bytearray(open(path, "rb").read())
+    _, rc, fc, rs, sb = struct.unpack_from("<4sIIII", data, 0)
+    index = {}
+    for i in range(rc):
+        off = 20 + i * rs
+        index[struct.unpack_from("<I", data, off)[0]] = off
+    _SPELL_DBC_RAW = (data, index, (rc, fc, rs, sb))
+    return _SPELL_DBC_RAW
+
+_SPELL_NAME_FIELD = 136       # Name_Lang_enUS (string)
+_SPELL_DESC_FIELD = 170       # Description_Lang_enUS (string) — the glyph tooltip text
+
+def _read_glyph_effect(spell_id):
+    """Decode the 3 effect slots of a glyph's effect spell into editable modifier fields. Reads the
+    in-RAM Spell.dbc first, then the spell_dbc TABLE — custom effect spells (ID >= _SPELL_CREATE_MIN_ID)
+    live only in the table, so without this fallback custom glyphs show 'no editable effect data'."""
+    sid = int(spell_id or 0)
+    sp = _DBC.get("Spell", {}).get(sid)
+    slots = []
+    if sp:
+        for i in range(3):
+            slots.append({"slot": i + 1, "effect": int(sp.get(f"effect_{i+1}", 0) or 0),
+                          "aura": int(sp.get(f"aura_{i+1}", 0) or 0),
+                          "modop": _s32(sp.get(f"misc_val_{i+1}", 0)),
+                          "value": _s32(sp.get(f"base_pts_{i+1}", 0)) + 1})
+        name = sp.get("name", "")
+        desc = _resolve_spell_vars(sp.get("desc", ""), sid)
+        icon = _DBC_SPELL_ICON_MAP.get(sid, "")
+    else:
+        try:
+            row = query("SELECT Name_Lang_enUS, Description_Lang_enUS, SpellIconID, "
+                        "Effect_1, Effect_2, Effect_3, EffectAura_1, EffectAura_2, EffectAura_3, "
+                        "EffectMiscValue_1, EffectMiscValue_2, EffectMiscValue_3, "
+                        "EffectBasePoints_1, EffectBasePoints_2, EffectBasePoints_3 "
+                        "FROM spell_dbc WHERE ID = %s", [sid], one=True)
+        except Exception:
+            row = None
+        if not row:
+            return None
+        for i in range(3):
+            slots.append({"slot": i + 1, "effect": int(row.get(f"Effect_{i+1}") or 0),
+                          "aura": int(row.get(f"EffectAura_{i+1}") or 0),
+                          "modop": _s32(row.get(f"EffectMiscValue_{i+1}")),
+                          "value": _s32(row.get(f"EffectBasePoints_{i+1}")) + 1})
+        name = row.get("Name_Lang_enUS") or ""
+        desc = _resolve_spell_vars(row.get("Description_Lang_enUS") or "", sid)
+        icon = _glyph_icon_name(row.get("SpellIconID") or 0)
+    return {"spellId": sid, "name": name, "desc": desc, "icon": icon, "slots": slots}
+
+# field index → parsed-dict key, for mirroring edits into the in-RAM Spell cache
+_SPELL_FX_IDX_TO_KEY = {}
+for _key, _idxs in {"effect_%d": _SPELL_FX_FIELDS["effect"], "aura_%d": _SPELL_FX_FIELDS["aura"],
+                    "misc_val_%d": _SPELL_FX_FIELDS["modop"], "base_pts_%d": _SPELL_FX_FIELDS["base_pts"]}.items():
+    for _slot, _fidx in enumerate(_idxs, start=1):
+        _SPELL_FX_IDX_TO_KEY[_fidx] = _key % _slot
+
+def _patch_spell_dbc_fields(spell_id, field_values=None, str_values=None):
+    """In-place patch one Spell.dbc record (server data/dbc, one-time .bak) and mirror into RAM.
+    field_values = {field_index: int}; str_values = {field_index: text} (appended to the string
+    block, record offset repointed). Returns (server_written, backup_created). Caller rebuilds MPQ."""
+    import shutil
+    field_values = field_values or {}
+    str_values = str_values or {}
+    data, index, (rc, fc, rs, sb) = _load_spell_dbc_raw()
+    off = index.get(int(spell_id))
+    if off is None:
+        raise RuntimeError(f"Spell {spell_id} not in Spell.dbc")
+    for fidx, val in field_values.items():
+        struct.pack_into("<i", data, off + int(fidx) * 4, _s32(val))
+    # Strings: records sit BEFORE the string block, so appending never shifts record offsets.
+    if str_values:
+        sb_start = 20 + rc * rs
+        for fidx, text in str_values.items():
+            new_off = len(data) - sb_start
+            data.extend(str(text).encode("utf-8") + b"\x00")
+            struct.pack_into("<I", data, off + int(fidx) * 4, new_off)
+        struct.pack_into("<I", data, 16, len(data) - sb_start)   # header string-block size
+    path = _find_dbc("Spell.dbc")
+    backed_up = False
+    if path and os.path.exists(path):
+        bak = path + ".bak"
+        if not os.path.exists(bak):
+            shutil.copy2(path, bak); backed_up = True
+        with open(path, "wb") as f:
+            f.write(data)
+    # mirror into RAM so the running tool reflects the edit immediately
+    sp = _DBC.get("Spell", {}).get(int(spell_id))
+    if sp:
+        for fidx, val in field_values.items():
+            k = _SPELL_FX_IDX_TO_KEY.get(int(fidx))
+            if k:
+                sp[k] = _s32(val) & 0xFFFFFFFF if k.startswith(("base_pts", "misc_val")) else _s32(val)
+        for fidx, text in str_values.items():
+            if int(fidx) == _SPELL_NAME_FIELD:
+                sp["name"] = str(text)
+                _DBC_SPELL_DATA.setdefault(int(spell_id), {})["name"] = str(text)
+            elif int(fidx) == _SPELL_DESC_FIELD:
+                sp["desc"] = str(text)
+                _DBC_SPELL_DATA.setdefault(int(spell_id), {})["desc"] = str(text)
+    return bool(path), backed_up
+
+
+@app.route("/api/glyph/effect/<int:spell_id>")
+def glyph_effect_get(spell_id):
+    """Current effect breakdown of a glyph's effect spell (for the effect editor GUI). For CUSTOM
+    effect spells it also returns `components` — the friendly slot reconstruction (modifier/proc/
+    none) — so the edit form can show the same beginner builder as the create form."""
+    try:
+        fx = _read_glyph_effect(spell_id)
+        if not fx:
+            return err("Effect spell not found in Spell.dbc", 404)
+        fx["custom"] = spell_id >= _SPELL_CREATE_MIN_ID
+        fx["iconId"] = _spell_icon_num(spell_id)
+        if fx["custom"]:
+            comps = _glyph_effect_components(spell_id)
+            if comps is not None:
+                fx["components"] = comps
+        return ok(fx)
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.route("/api/glyph/effect/save", methods=["POST"])
+def glyph_effect_save():
+    """Patch a glyph's effect spell in Spell.dbc (server + client MPQ). Body:
+    { spellId, slots: [ {slot, effect, aura, modop, value}, ... ], description }.
+    All 3 slots should be sent — an empty slot (effect 0) is cleared, so effects can be
+    added/removed. `description` (optional) is written to the client tooltip text."""
+    d = request.get_json() or {}
+    spell_id = int(d.get("spellId", 0))
+    slots = d.get("slots", [])
+    if not spell_id or not slots:
+        return err("spellId and slots are required")
+    try:
+        field_values = {}
+        for s in slots:
+            i = int(s.get("slot", 0))
+            if i < 1 or i > 3:
+                continue
+            eff = int(s.get("effect", 0) or 0)
+            field_values[_SPELL_FX_FIELDS["effect"][i - 1]]   = eff
+            field_values[_SPELL_FX_FIELDS["aura"][i - 1]]     = int(s.get("aura", 0) or 0) if eff else 0
+            field_values[_SPELL_FX_FIELDS["modop"][i - 1]]    = int(s.get("modop", 0) or 0) if eff else 0
+            field_values[_SPELL_FX_FIELDS["base_pts"][i - 1]] = (int(s.get("value", 0) or 0) - 1) if eff else 0
+        if not field_values:
+            return err("No effect fields to change")
+        str_values = {}
+        if d.get("description") is not None:
+            str_values[_SPELL_DESC_FIELD] = str(d["description"])
+        server_written, backed_up = _patch_spell_dbc_fields(spell_id, field_values, str_values)
+        mpq_path, copied, mpq_err = _build_item_patch_mpq()
+        return ok({"spellId": spell_id, "server_written": server_written,
+                   "backup_created": backed_up, "mpq_path": mpq_path,
+                   "copied_to_client": copied, "mpq_error": mpq_err})
+    except Exception as e:
+        return err(str(e), 500)
+
+
+# ── Proc / spread glyphs (pure DB, no C++) ────────────────────────────────────
+# "When you cast X, all enemies within R yd of your target also take an effect." This is a
+# server-side PROC (native proc engine + spell_proc table) — no client script, so it works for
+# every player via the MPQ patch. We build two custom spells + a spell_proc row:
+#   1. an AoE damage spell that hits enemies in a radius around the target (loop-safe: it's its
+#      own damage spell, NOT a re-cast of the trigger, and its family doesn't match the trigger's),
+#   2. a passive proc aura (SPELL_AURA_PROC_TRIGGER_SPELL) that fires spell 1,
+#   3. a spell_proc row restricting the proc to the trigger spell's SpellFamily + class mask.
+_SPELL_FAMILY_FIELD = 208                 # SpellFamilyName (verified against Moonfire/Mortal Strike)
+_SPELL_CLASSMASK_FIELDS = (209, 210, 211) # SpellClassMask (3 words)
+_SPELL_VISUAL_FIELD = 131                 # SpellVisualID_1 (schema: visual_1)
+# "Done harmful spell of any damage class" — magic-neg | melee | ranged | none-neg. The tight
+# SpellFamily+mask below means only the chosen trigger spell can actually fire it, so a broad
+# flag is safe and works whether the trigger is a caster (Moonfire) or a physical ability.
+# NOTE: 0x4000 was wrong — that is DONE_SPELL_MAGIC_DMG_CLASS_POS (positive); harmful magic is 0x10000.
+_PROC_FLAG_DONE_HARMFUL_SPELL = 0x00010000 | 0x00000010 | 0x00000100 | 0x00001000
+
+def _read_spell_family(spell_id):
+    """(SpellFamilyName, mask0, mask1, mask2) of a spell from Spell.dbc — for proc restriction."""
+    data, index, _ = _load_spell_dbc_raw()
+    off = index.get(int(spell_id or 0))
+    if off is None:
+        return (0, 0, 0, 0)
+    fam = struct.unpack_from("<I", data, off + _SPELL_FAMILY_FIELD * 4)[0]
+    m = [struct.unpack_from("<I", data, off + fi * 4)[0] for fi in _SPELL_CLASSMASK_FIELDS]
+    return (fam, m[0], m[1], m[2])
+
+def _radius_index_for(yards):
+    """Closest SpellRadius.dbc index for the requested radius (yards). Returns (index, actual_yd)."""
+    best, best_val, best_diff = 9, 20.0, 1e9
+    for rid, row in _DBC.get("SpellRadius", {}).items():
+        rv = row.get("radius", 0) or 0
+        d = abs(rv - yards)
+        if d < best_diff:
+            best_diff, best, best_val = d, rid, rv
+    return best, best_val
+
+
+@app.route("/api/glyph/proc-create", methods=["POST"])
+def glyph_proc_create():
+    """Create a proc/spread glyph effect spell (pure DB). Body:
+    { name, triggerSpellId, radius, damage, school, iconId }.
+    Returns the proc aura spell id (link it as the glyph's effect spell)."""
+    d = request.get_json() or {}
+    name = (d.get("name") or "").strip()
+    trigger = int(d.get("triggerSpellId", 0))
+    yards = int(d.get("radius", 20) or 20)
+    if not name or not trigger:
+        return err("name and triggerSpellId are required")
+    try:
+        fam, m0, m1, m2 = _read_spell_family(trigger)
+        tsp = _DBC.get("Spell", {}).get(trigger) or {}
+        school = int(d.get("school") or 0) or int(tsp.get("school_mask", 0) or 1)
+        icon_id = int(d.get("iconId", 0)) or int(tsp.get("icon_id", 0) or 0)
+        rad_idx, rad_actual = _radius_index_for(yards)
+        trig_name = tsp.get("name", "") or f"spell #{trigger}"
+        # Replicate the trigger's look + damage so each nearby enemy shows its visual, takes its
+        # direct hit AND gets its DoT — without re-casting it (loop-safe). Scan all 3 effects,
+        # since spells put direct damage / periodic aura on different slots (e.g. Moonfire's DoT is
+        # on effect 1, its direct damage on effect 2).
+        visual  = int(tsp.get("visual_1", 0) or 0)
+        dur_idx = int(tsp.get("duration_idx", 0) or 0)
+        direct_dmg = dot_aura = dot_base = dot_period = 0
+        for n in (1, 2, 3):
+            eff  = int(tsp.get(f"effect_{n}", 0) or 0)
+            aura = int(tsp.get(f"aura_{n}", 0) or 0)
+            base = _s32(tsp.get(f"base_pts_{n}", 0))
+            if eff == 2:                         # SCHOOL_DAMAGE (direct hit)
+                direct_dmg = base + 1
+            elif eff == 6 and aura == 3:         # APPLY_AURA / PERIODIC_DAMAGE (DoT)
+                dot_aura, dot_base = aura, base
+                dot_period = int(tsp.get(f"aura_period_{n}", 0) or 0)
+        damage = int(d.get("damage") or 0) or direct_dmg or (dot_base + 1) or 100
+        if damage < 1:
+            damage = 100
+
+        # reserve two consecutive custom spell ids
+        row = query("SELECT MAX(ID) AS m FROM spell_dbc WHERE ID >= %s", [_SPELL_CREATE_MIN_ID], one=True)
+        base_id = (row["m"] or _SPELL_CREATE_MIN_ID - 1) + 1
+        aoe_id, proc_id = base_id, base_id + 1
+
+        def _insert_spell(cols):
+            keys = list(cols.keys()); vals = list(cols.values())
+            execute(f"INSERT INTO spell_dbc ({','.join('`'+k+'`' for k in keys)}) "
+                    f"VALUES ({','.join(['%s']*len(keys))}) "
+                    f"ON DUPLICATE KEY UPDATE {','.join(f'`{k}`=VALUES(`{k}`)' for k in keys if k != 'ID')}",
+                    vals)
+
+        # 1) AoE spell — hits all enemies within the radius of the target (target 16 =
+        #    TARGET_UNIT_DEST_AREA_ENEMY, like Seed of Corruption's detonation).
+        #    payload "real"  → SPELL_EFFECT_TRIGGER_SPELL casts the ACTUAL trigger spell on each
+        #                      enemy (exact damage/DoT/visual/debuff, auto-scales). A proc ICD
+        #                      (set below) stops the re-cast enemies from re-triggering the glyph.
+        #    payload "copy"  → replicate the trigger's direct hit + DoT + visual as its own spell
+        #                      (100% loop-safe by construction, but a static copy).
+        payload = (d.get("payload") or "copy").lower()
+        aoe = dict(_SPELL_DBC_DEFAULTS)
+        aoe.update({"ID": aoe_id, "Name_Lang_enUS": f"{name} (spread)", "SpellIconID": icon_id,
+                    "Attributes": 0, "CastingTimeIndex": 1, "SchoolMask": school})
+        if payload == "real":
+            aoe.update({
+                "Effect_1": 64, "EffectTriggerSpell_1": trigger,     # SPELL_EFFECT_TRIGGER_SPELL
+                "ImplicitTargetA_1": 16, "EffectRadiusIndex_1": rad_idx,
+            })
+        else:
+            aoe.update({
+                "Effect_1": 2, "EffectBasePoints_1": damage - 1, "EffectDieSides_1": 1,
+                "ImplicitTargetA_1": 16, "EffectRadiusIndex_1": rad_idx,
+                "SpellVisualID_1": visual,       # show the trigger's graphic on each victim
+            })
+            if dot_aura and dot_period:          # copy the trigger's DoT/HoT onto the AoE victims
+                aoe.update({
+                    "Effect_2": 6, "EffectAura_2": dot_aura,
+                    "EffectBasePoints_2": dot_base, "EffectDieSides_2": 1,
+                    "EffectAuraPeriod_2": dot_period, "ImplicitTargetA_2": 16,
+                    "EffectRadiusIndex_2": rad_idx, "DurationIndex": dur_idx or 21,
+                })
+        _insert_spell(aoe)
+
+        # 2) Passive proc aura — triggers the AoE spell
+        desc = (f"When you cast {trig_name}, it also strikes all enemies within {int(round(rad_actual))} "
+                f"yards of your target.")
+        proc = dict(_SPELL_DBC_DEFAULTS)
+        proc.update({
+            "ID": proc_id, "Name_Lang_enUS": name, "Description_Lang_enUS": desc,
+            "SpellIconID": icon_id, "Attributes": 64, "CastingTimeIndex": 1, "SchoolMask": 1,
+            "Effect_1": 6, "EffectAura_1": 42, "EffectTriggerSpell_1": aoe_id,
+            "ImplicitTargetA_1": 1, "ProcChance": 100,
+        })
+        _insert_spell(proc)
+
+        # 3) spell_proc row — restrict the proc to the trigger spell's family + class mask.
+        #    SpellTypeMask=1 (damage), SpellPhaseMask=2 (hit) match AzerothCore's working caster
+        #    procs (e.g. druid proc 54845). ProcFlags = done harmful spell (any class).
+        #    For payload "real", a 250 ms internal cooldown stops the freshly-cast enemy spells
+        #    (same server tick) from re-triggering the glyph → no cascade/loop.
+        proc_cd = 250 if payload == "real" else 0
+        pr = {"SpellId": proc_id, "SchoolMask": 0, "SpellFamilyName": fam,
+              "SpellFamilyMask0": m0 & 0xFFFFFFFF, "SpellFamilyMask1": m1 & 0xFFFFFFFF,
+              "SpellFamilyMask2": m2 & 0xFFFFFFFF, "ProcFlags": _PROC_FLAG_DONE_HARMFUL_SPELL,
+              "SpellTypeMask": 1, "SpellPhaseMask": 2, "Cooldown": proc_cd, "Chance": 100}
+        pk = list(pr.keys()); pv = list(pr.values())
+        execute(f"INSERT INTO spell_proc ({','.join('`'+k+'`' for k in pk)}) "
+                f"VALUES ({','.join(['%s']*len(pk))}) "
+                f"ON DUPLICATE KEY UPDATE {','.join(f'`{k}`=VALUES(`{k}`)' for k in pk if k != 'SpellId')}",
+                pv)
+
+        mpq_path, copied, mpq_err = _build_item_patch_mpq()
+        warning = None
+        if fam == 0:
+            warning = ("The trigger spell has no SpellFamily — the proc can't be restricted to it and "
+                       "may fire on other spells too. Pick a class ability with a spell family.")
+        return ok({"procSpellId": proc_id, "aoeSpellId": aoe_id, "spellName": name,
+                   "triggerName": trig_name, "family": fam, "mask": [m0, m1, m2],
+                   "radiusYards": int(round(rad_actual)), "damage": damage, "description": desc,
+                   "mpq_path": mpq_path, "copied_to_client": copied, "mpq_error": mpq_err,
+                   "warning": warning})
+    except Exception as e:
+        return err(str(e), 500)
+
+
+def _spread_aoe_cols(aoe_id, name, icon_id, trigger, yards, payload, damage_override, school_override):
+    """Build the spell_dbc column dict for a spread AoE spell (real-trigger or damage-copy)."""
+    rad_idx, _ = _radius_index_for(yards)
+    tsp = _DBC.get("Spell", {}).get(trigger) or {}
+    school = int(school_override or 0) or int(tsp.get("school_mask", 0) or 1)
+    aoe = dict(_SPELL_DBC_DEFAULTS)
+    aoe.update({"ID": aoe_id, "Name_Lang_enUS": f"{name} (spread)", "SpellIconID": icon_id,
+                "Attributes": 0, "CastingTimeIndex": 1, "SchoolMask": school})
+    if (payload or "real").lower() == "real":
+        aoe.update({"Effect_1": 64, "EffectTriggerSpell_1": trigger,
+                    "ImplicitTargetA_1": 16, "EffectRadiusIndex_1": rad_idx})
+    else:
+        visual = int(tsp.get("visual_1", 0) or 0); dur_idx = int(tsp.get("duration_idx", 0) or 0)
+        direct = dot_a = dot_b = dot_p = 0
+        for n in (1, 2, 3):
+            e = int(tsp.get(f"effect_{n}", 0) or 0); a = int(tsp.get(f"aura_{n}", 0) or 0)
+            b = _s32(tsp.get(f"base_pts_{n}", 0))
+            if e == 2: direct = b + 1
+            elif e == 6 and a == 3: dot_a, dot_b = a, b; dot_p = int(tsp.get(f"aura_period_{n}", 0) or 0)
+        dmg = int(damage_override or 0) or direct or (dot_b + 1) or 100
+        aoe.update({"Effect_1": 2, "EffectBasePoints_1": dmg - 1, "EffectDieSides_1": 1,
+                    "ImplicitTargetA_1": 16, "EffectRadiusIndex_1": rad_idx, "SpellVisualID_1": visual})
+        if dot_a and dot_p:
+            aoe.update({"Effect_2": 6, "EffectAura_2": dot_a, "EffectBasePoints_2": dot_b,
+                        "EffectDieSides_2": 1, "EffectAuraPeriod_2": dot_p, "ImplicitTargetA_2": 16,
+                        "EffectRadiusIndex_2": rad_idx, "DurationIndex": dur_idx or 21})
+    return aoe
+
+
+def _assemble_glyph_effect(effect_id, aoe_id, name, icon_id, description, comps):
+    """Write ONE glyph effect spell (+ its AoE spell + spell_proc row) from a list of components
+    (modifiers + at most one proc). Uses the full defaults dict as base, so a rebuild cleanly
+    overwrites every field. Returns hasProc(bool). Caller reserves ids + rebuilds the MPQ."""
+    def _insert_spell(cols):
+        keys = list(cols.keys()); vals = list(cols.values())
+        execute(f"INSERT INTO spell_dbc ({','.join('`'+k+'`' for k in keys)}) "
+                f"VALUES ({','.join(['%s']*len(keys))}) "
+                f"ON DUPLICATE KEY UPDATE {','.join(f'`{k}`=VALUES(`{k}`)' for k in keys if k != 'ID')}", vals)
+    mods = [c for c in comps if c.get("type") == "modifier"]
+    proc = next((c for c in comps if c.get("type") == "proc"), None)
+    cols = dict(_SPELL_DBC_DEFAULTS)
+    cols.update({"ID": effect_id, "Name_Lang_enUS": name, "Description_Lang_enUS": description,
+                 "SpellIconID": icon_id, "Attributes": 64, "CastingTimeIndex": 1, "SchoolMask": 1})
+    family_set = 0
+    slot = 1
+    for m in mods:
+        if slot > 3:
+            break
+        aura = 108 if (m.get("mtype") == "pct") else 107
+        amount = abs(int(m.get("amount", 0) or 0))
+        value = -amount if (m.get("dir") == "dec") else amount
+        cols[f"Effect_{slot}"] = 6
+        cols[f"EffectAura_{slot}"] = aura
+        cols[f"EffectMiscValue_{slot}"] = int(m.get("modop", 0) or 0)
+        cols[f"EffectBasePoints_{slot}"] = value - 1
+        cols[f"EffectDieSides_{slot}"] = 1
+        cols[f"ImplicitTargetA_{slot}"] = 1
+        tgt = int(m.get("targetSpellId", 0) or 0)
+        if tgt:
+            fam, ma, mb, mc = _read_spell_family(tgt)
+            family_set = fam or family_set
+            cols[f"EffectSpellClassMaskA_{slot}"] = ma & 0xFFFFFFFF
+            cols[f"EffectSpellClassMaskB_{slot}"] = mb & 0xFFFFFFFF
+            cols[f"EffectSpellClassMaskC_{slot}"] = mc & 0xFFFFFFFF
+        slot += 1
+    if family_set:
+        cols["SpellClassSet"] = family_set
+    proc_info = None
+    if proc and slot <= 3:
+        trig = int(proc.get("triggerSpellId", 0) or 0)
+        if trig:
+            payload = (proc.get("payload") or "real").lower()
+            aoe = _spread_aoe_cols(aoe_id, name, icon_id, trig, int(proc.get("radius", 20) or 20),
+                                   payload, proc.get("damage"), proc.get("school"))
+            _insert_spell(aoe)
+            cols[f"Effect_{slot}"] = 6
+            cols[f"EffectAura_{slot}"] = 42
+            cols[f"EffectTriggerSpell_{slot}"] = aoe_id
+            cols[f"ImplicitTargetA_{slot}"] = 1
+            cols["ProcChance"] = 100
+            fam, m0, m1, m2 = _read_spell_family(trig)
+            proc_info = {"fam": fam, "m0": m0, "m1": m1, "m2": m2, "payload": payload}
+    _insert_spell(cols)
+    if proc_info:
+        cd = 250 if proc_info["payload"] == "real" else 0
+        pr = {"SpellId": effect_id, "SchoolMask": 0, "SpellFamilyName": proc_info["fam"],
+              "SpellFamilyMask0": proc_info["m0"] & 0xFFFFFFFF, "SpellFamilyMask1": proc_info["m1"] & 0xFFFFFFFF,
+              "SpellFamilyMask2": proc_info["m2"] & 0xFFFFFFFF, "ProcFlags": _PROC_FLAG_DONE_HARMFUL_SPELL,
+              "SpellTypeMask": 1, "SpellPhaseMask": 2, "Cooldown": cd, "Chance": 100}
+        pk = list(pr.keys()); pv = list(pr.values())
+        execute(f"INSERT INTO spell_proc ({','.join('`'+k+'`' for k in pk)}) "
+                f"VALUES ({','.join(['%s']*len(pk))}) "
+                f"ON DUPLICATE KEY UPDATE {','.join(f'`{k}`=VALUES(`{k}`)' for k in pk if k != 'SpellId')}", pv)
+    else:
+        try:
+            execute("DELETE FROM spell_proc WHERE SpellId = %s", [effect_id])
+        except Exception:
+            pass
+    return bool(proc_info)
+
+
+def _yards_for_radius_index(idx):
+    row = _DBC.get("SpellRadius", {}).get(int(idx or 0))
+    return int(round(row.get("radius", 20))) if row else 20
+
+def _find_spell_by_family_mask(family, mask_a):
+    """Representative (id, name) of a spell matching SpellFamilyName + SpellClassMask — used to show
+    a modifier's target / a proc's trigger by name when reconstructing a saved glyph effect."""
+    family = int(family or 0); mask_a = int(mask_a or 0)
+    if not family or not mask_a:
+        return (0, "")
+    data, index, _ = _load_spell_dbc_raw()
+    best = (0, "")
+    for sid, off in index.items():
+        if struct.unpack_from("<I", data, off + _SPELL_FAMILY_FIELD * 4)[0] != family:
+            continue
+        if struct.unpack_from("<I", data, off + _SPELL_CLASSMASK_FIELDS[0] * 4)[0] != mask_a:
+            continue
+        nm = (_DBC_SPELL_DATA.get(sid) or {}).get("name", "")
+        if nm and sid > best[0]:
+            best = (sid, nm)
+    return best
+
+def _glyph_effect_components(spell_id):
+    """Reconstruct the friendly slot components (modifier / proc / none) of a CUSTOM glyph effect
+    spell, so the edit form can show the same beginner builder as create. Returns a list of 3."""
+    sid = int(spell_id)
+    row = query("SELECT * FROM spell_dbc WHERE ID = %s", [sid], one=True)
+    if not row:
+        return None
+    proc_row = query("SELECT SpellFamilyName, SpellFamilyMask0 FROM spell_proc WHERE SpellId = %s", [sid], one=True)
+    out = []
+    for n in (1, 2, 3):
+        eff = int(row.get(f"Effect_{n}") or 0)
+        aura = int(row.get(f"EffectAura_{n}") or 0)
+        if eff == 6 and aura in (107, 108):
+            value = _s32(row.get(f"EffectBasePoints_{n}")) + 1
+            mask_a = int(row.get(f"EffectSpellClassMaskA_{n}") or 0)
+            fam = int(row.get("SpellClassSet") or 0)
+            tid, tname = _find_spell_by_family_mask(fam, mask_a) if mask_a else (0, "")
+            out.append({"type": "modifier", "dir": "dec" if value < 0 else "inc",
+                        "modop": _s32(row.get(f"EffectMiscValue_{n}")), "mtype": "pct" if aura == 108 else "flat",
+                        "amount": abs(value), "targetSpellId": tid, "targetName": tname})
+        elif eff == 6 and aura == 42:
+            aoe_id = int(row.get(f"EffectTriggerSpell_{n}") or 0)
+            aoe = query("SELECT Effect_1, EffectTriggerSpell_1, EffectRadiusIndex_1 FROM spell_dbc WHERE ID = %s",
+                        [aoe_id], one=True) if aoe_id else None
+            payload, trig, tname, radius = "copy", 0, "", 20
+            if aoe:
+                radius = _yards_for_radius_index(int(aoe.get("EffectRadiusIndex_1") or 9))
+                if int(aoe.get("Effect_1") or 0) == 64:
+                    payload = "real"; trig = int(aoe.get("EffectTriggerSpell_1") or 0)
+                    tname = (_DBC_SPELL_DATA.get(trig) or {}).get("name", "")
+            if not trig and proc_row:
+                trig, tname = _find_spell_by_family_mask(proc_row["SpellFamilyName"], proc_row["SpellFamilyMask0"])
+            out.append({"type": "proc", "triggerSpellId": trig, "triggerName": tname, "radius": radius, "payload": payload})
+        else:
+            out.append({"type": "none"})
+    return out
+
+
+@app.route("/api/glyph/effect-rebuild", methods=["POST"])
+def glyph_effect_rebuild():
+    """Rebuild an EXISTING custom glyph effect spell in place (same id) from friendly components —
+    the beginner slot builder for editing. Deletes the old AoE + spell_proc, writes the new ones,
+    then rebuilds the MPQ. Only for custom effect spells (ID >= _SPELL_CREATE_MIN_ID)."""
+    d = request.get_json() or {}
+    sid = int(d.get("spellId", 0))
+    comps = [c for c in (d.get("components") or []) if c.get("type") and c.get("type") != "none"]
+    name = (d.get("name") or "").strip()
+    description = (d.get("description") or "").strip()
+    icon_id = int(d.get("iconId", 0) or 0)
+    if sid < _SPELL_CREATE_MIN_ID:
+        return err("Only custom glyph effect spells can be rebuilt in the beginner editor")
+    if not comps:
+        return err("Set at least one effect slot")
+    if sum(1 for c in comps if c["type"] == "proc") > 1:
+        return err("Only one proc/spread per glyph")
+    try:
+        old = query("SELECT * FROM spell_dbc WHERE ID = %s", [sid], one=True)
+        if not old:
+            return err("Effect spell not found", 404)
+        if not name:
+            name = old.get("Name_Lang_enUS") or f"Spell #{sid}"
+        if not icon_id:
+            icon_id = int(old.get("SpellIconID") or 0)
+        # drop the old AoE spell(s) this effect triggered
+        for n in (1, 2, 3):
+            if int(old.get(f"EffectAura_{n}") or 0) == 42:
+                old_aoe = int(old.get(f"EffectTriggerSpell_{n}") or 0)
+                if old_aoe >= _SPELL_CREATE_MIN_ID:
+                    execute("DELETE FROM spell_dbc WHERE ID = %s", [old_aoe])
+        # reserve a fresh AoE id if the new build has a proc
+        aoe_id = 0
+        if any(c["type"] == "proc" for c in comps):
+            r = query("SELECT MAX(ID) AS m FROM spell_dbc WHERE ID >= %s", [_SPELL_CREATE_MIN_ID], one=True)
+            aoe_id = (r["m"] or _SPELL_CREATE_MIN_ID - 1) + 1
+        has_proc = _assemble_glyph_effect(sid, aoe_id, name, icon_id, description, comps)
+        mpq_path, copied, mpq_err = _build_item_patch_mpq()
+        return ok({"effectSpellId": sid, "hasProc": has_proc, "mpq_path": mpq_path,
+                   "copied_to_client": copied, "mpq_error": mpq_err})
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.route("/api/glyph/effect-build", methods=["POST"])
+def glyph_effect_build():
+    """Build ONE glyph effect spell from multiple components (modifiers + at most one proc/spread),
+    combined across the spell's 3 effect slots. Pure DB. `description` (the client's auto-tooltip)
+    is stored as the spell tooltip. Returns the effect spell id to link as the glyph's effect."""
+    d = request.get_json() or {}
+    name = (d.get("name") or "").strip()
+    comps = d.get("components") or []
+    icon_id = int(d.get("iconId", 0) or 0)
+    description = (d.get("description") or "").strip()
+    if not name:
+        return err("A name is required")
+    if not comps:
+        return err("Add at least one effect")
+    if len(comps) > 3:
+        return err("A spell has at most 3 effects — remove one")
+    mods  = [c for c in comps if c.get("type") == "modifier"]
+    procs = [c for c in comps if c.get("type") == "proc"]
+    if len(procs) > 1:
+        return err("Only one proc/spread per glyph (spell_proc allows one trigger per spell)")
+    try:
+        row = query("SELECT MAX(ID) AS m FROM spell_dbc WHERE ID >= %s", [_SPELL_CREATE_MIN_ID], one=True)
+        next_id = (row["m"] or _SPELL_CREATE_MIN_ID - 1) + 1
+        effect_id = next_id; next_id += 1
+        aoe_id = 0
+        if procs:
+            aoe_id = next_id; next_id += 1
+        has_proc = _assemble_glyph_effect(effect_id, aoe_id, name, icon_id, description, comps)
+        return ok({"effectSpellId": effect_id, "description": description, "hasProc": has_proc})
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.route("/api/glyph/icons")
+def glyph_icons_search():
+    """Search SpellIcon.dbc for the icon picker. ?q=fire → [{id, name}] (wowhead icon names)."""
+    q = (request.args.get("q", "") or "").strip().lower()
+    limit = min(int(request.args.get("limit", 120)), 500)
+    out = []
+    for iid in _DBC.get("SpellIcon", {}):
+        name = _glyph_icon_name(iid)
+        if not name:
+            continue
+        if q and q not in name:
+            continue
+        out.append({"id": iid, "name": name})
+        if len(out) >= limit:
+            break
+    out.sort(key=lambda x: x["name"])
+    return ok(out)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Spell Creator — custom spells in spell_dbc (+ optional proc/bonus/threat/cd)
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -7625,11 +8702,14 @@ def get_spell_tooltip(spell_id):
     # ── 1. DBC in-memory cache (most complete) ──────────────────────────────
     dbc_cached = _DBC_SPELL_DATA.get(spell_id, {})
 
-    # ── 2. DB spell_dbc (has CastingTimeIndex, RecoveryTime in its 33 cols) ─
+    # ── 2. DB spell_dbc — CastingTime/Recovery + (for CUSTOM spells not in the RAM cache) the
+    #       name/description/icon/school, so custom glyph effect spells still get a hover tooltip.
     db_row = None
     try:
         db_row = query(
-            "SELECT CastingTimeIndex, RecoveryTime, CategoryRecoveryTime "
+            "SELECT CastingTimeIndex, RecoveryTime, CategoryRecoveryTime, "
+            "Name_Lang_enUS AS db_name, Description_Lang_enUS AS db_desc, "
+            "SpellIconID AS db_icon, SchoolMask AS db_school "
             "FROM spell_dbc WHERE ID = %s", [spell_id], one=True
         )
     except Exception:
@@ -7660,16 +8740,17 @@ def get_spell_tooltip(spell_id):
         pass
 
     # ── Assemble: DBC → DB → template (template wins) ───────────────────────
-    name        = dbc_cached.get("name") or ""
+    name        = dbc_cached.get("name") or (db_row.get("db_name") if db_row else "") or ""
     rank        = dbc_cached.get("rank") or ""
-    desc        = dbc_cached.get("desc") or ""
-    icon        = dbc_cached.get("icon") or _DBC_SPELL_ICON_MAP.get(spell_id, "")
+    desc        = dbc_cached.get("desc") or (db_row.get("db_desc") if db_row else "") or ""
+    icon        = (dbc_cached.get("icon") or _DBC_SPELL_ICON_MAP.get(spell_id, "")
+                   or (_glyph_icon_name(db_row.get("db_icon")) if db_row else ""))
     power_type  = dbc_cached.get("power_type", 0)
     mana_cost   = dbc_cached.get("mana_cost", 0)
     range_index = dbc_cached.get("range_index", 0)
     cast_index  = dbc_cached.get("cast_index") or (db_row["CastingTimeIndex"] if db_row else 0)
     recovery_ms = dbc_cached.get("recovery_ms") or (db_row["RecoveryTime"] if db_row else 0)
-    school_mask = dbc_cached.get("school_mask", 0)
+    school_mask = dbc_cached.get("school_mask", 0) or (db_row.get("db_school") if db_row else 0) or 0
 
     if cd_override and cd_override.get("RecoveryTime"):
         recovery_ms = cd_override["RecoveryTime"]
