@@ -1,1 +1,47 @@
+# --- Windows & Betriebssysteme ---
+Thumbs.db
+Desktop.ini
+.DS_Store
 
+# --- Code-Editoren & IDEs (Visual Studio, VS Code, Notepad++) ---
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.bak
+*.old
+
+# --- Server-Kompilierung (Falls du ein C++ Modul für AzerothCore baust) ---
+*.obj
+*.pdb
+*.ild
+*.idb
+*.alloc
+*.exp
+*.lib
+*.dll
+*.exe
+build/
+bin/
+CMakeFiles/
+CMakeCache.txt
+*.cmake
+
+# --- Python Cache ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# --- Lokale Konfiguration (persönliche Pfade + DB-Zugangsdaten) — NIEMALS committen ---
+asp_config.json
+dba_settings.json
+mpq/
+DEV/
+
+# --- Lokale Testdaten & Backups ---
+Server/*.sql.bak
