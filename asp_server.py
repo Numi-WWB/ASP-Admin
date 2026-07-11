@@ -5988,6 +5988,11 @@ def glyph_save():
                     pass
 
         server_written, backed_up = _write_glyph_dbc(glyphs)
+        # save-all passes skip_mpq so the (expensive) MPQ build runs once at the end via /finalize.
+        if d.get("skip_mpq"):
+            _glyph_item_index(force=True)
+            return ok({"id": gid, "glyphs": len(glyphs), "renamed": renamed,
+                       "server_written": server_written, "backup_created": backed_up, "skipped_mpq": True})
         mpq_path, copied, mpq_err = _build_item_patch_mpq()
         _glyph_item_index(force=True)
         return ok({"id": gid, "glyphs": len(glyphs), "renamed": renamed,
@@ -6129,32 +6134,44 @@ def glyph_delete():
         server_written, backed_up = _write_glyph_dbc(glyphs)
         mpq_path, copied, mpq_err = _build_item_patch_mpq()
         _glyph_item_index(force=True)
-        return ok({"id": gid, "usage": _glyph_usage_count(gid),
-                   "mpq_path": mpq_path, "copied_to_client": copied, "mpq_error": mpq_err})
+        # A delete is exactly when bots/characters end up with a dangling ref → auto-repair now.
+        try:
+            bots_fixed, glyphs_cleared = _repair_bots_scan()
+        except Exception:
+            bots_fixed, glyphs_cleared = 0, 0
+        return ok({"id": gid, "mpq_path": mpq_path, "copied_to_client": copied, "mpq_error": mpq_err,
+                   "bots_fixed": bots_fixed, "glyphs_cleared": glyphs_cleared})
     except Exception as e:
         return err(str(e), 500)
 
 
+def _repair_bots_scan():
+    """Clear glyph ids in character_glyphs that no longer exist in GlyphProperties (after a
+    delete/renumber) so playerbots/characters don't hold dangling references (client errors).
+    Returns (fixed_rows, cleared_glyphs). Cheap enough to run automatically after every save."""
+    valid = {g["id"] for g in _read_glyph_dbc()} | {0}
+    rows = qchar("SELECT guid, talentGroup, glyph1, glyph2, glyph3, glyph4, glyph5, glyph6 "
+                 "FROM character_glyphs")
+    fixed_rows = 0; cleared = 0
+    for r in rows:
+        updates = {}
+        for i in range(1, 7):
+            gv = r[f"glyph{i}"]
+            if gv and gv not in valid:
+                updates[f"glyph{i}"] = 0; cleared += 1
+        if updates:
+            setclause = ",".join(f"{k}=%s" for k in updates)
+            exchar(f"UPDATE character_glyphs SET {setclause} WHERE guid=%s AND talentGroup=%s",
+                   list(updates.values()) + [r["guid"], r["talentGroup"]])
+            fixed_rows += 1
+    return fixed_rows, cleared
+
+
 @app.route("/api/glyph/repair-bots", methods=["POST"])
 def glyph_repair_bots():
-    """Clear glyph ids in character_glyphs that no longer exist in GlyphProperties (after a
-    delete/renumber) so playerbots/characters don't hold dangling references (client errors)."""
+    """Manual bot-repair endpoint (now also run automatically after save/delete)."""
     try:
-        valid = {g["id"] for g in _read_glyph_dbc()} | {0}
-        rows = qchar("SELECT guid, talentGroup, glyph1, glyph2, glyph3, glyph4, glyph5, glyph6 "
-                     "FROM character_glyphs")
-        fixed_rows = 0; cleared = 0
-        for r in rows:
-            updates = {}
-            for i in range(1, 7):
-                gv = r[f"glyph{i}"]
-                if gv and gv not in valid:
-                    updates[f"glyph{i}"] = 0; cleared += 1
-            if updates:
-                setclause = ",".join(f"{k}=%s" for k in updates)
-                exchar(f"UPDATE character_glyphs SET {setclause} WHERE guid=%s AND talentGroup=%s",
-                       list(updates.values()) + [r["guid"], r["talentGroup"]])
-                fixed_rows += 1
+        fixed_rows, cleared = _repair_bots_scan()
         return ok({"fixed_rows": fixed_rows, "cleared_glyphs": cleared})
     except Exception as e:
         return err(str(e), 500)
@@ -6854,9 +6871,27 @@ def glyph_effect_rebuild():
                             [description, name, learn["ID"]])
         except Exception:
             pass
+        if d.get("skip_mpq"):
+            return ok({"effectSpellId": sid, "hasProc": has_proc, "skipped_mpq": True})
         mpq_path, copied, mpq_err = _build_item_patch_mpq()
         return ok({"effectSpellId": sid, "hasProc": has_proc, "mpq_path": mpq_path,
                    "copied_to_client": copied, "mpq_error": mpq_err})
+    except Exception as e:
+        return err(str(e), 500)
+
+
+@app.route("/api/glyph/finalize", methods=["POST"])
+def glyph_finalize():
+    """Build the MPQ once and auto-repair dangling bot/character glyph refs. Called at the end of
+    the unified 'Save all + Patch' flow (after glyph/save + glyph/effect-rebuild ran with skip_mpq)."""
+    try:
+        mpq_path, copied, mpq_err = _build_item_patch_mpq()
+        try:
+            fixed_rows, cleared = _repair_bots_scan()
+        except Exception:
+            fixed_rows, cleared = 0, 0
+        return ok({"mpq_path": mpq_path, "copied_to_client": copied, "mpq_error": mpq_err,
+                   "bots_fixed": fixed_rows, "glyphs_cleared": cleared})
     except Exception as e:
         return err(str(e), 500)
 

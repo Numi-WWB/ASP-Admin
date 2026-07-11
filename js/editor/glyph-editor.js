@@ -270,7 +270,9 @@
         </div>
 
         <div style="display:flex;gap:8px;margin-top:14px;align-items:center;flex-wrap:wrap">
-          <button class="e-btn e-btn-green" onclick="glyphSave(this)">💾 Save + Patch</button>
+          ${g.custom
+            ? `<span style="color:var(--muted);font-size:0.72rem">Name &amp; icon are saved together with the effect by <b>💾 Save all + Patch</b> below.</span>`
+            : `<button class="e-btn e-btn-green" onclick="glyphSave(this)">💾 Save + Patch</button>`}
           ${g.custom?`<button class="e-btn" style="color:var(--red);border-color:var(--red)" onclick="glyphDelete(this)">🗑 Delete</button>`:''}
           <span id="glyph-edit-status" style="color:var(--muted);font-size:0.76rem"></span>
         </div>
@@ -321,6 +323,64 @@
     finally { if (btn){ btn.disabled = false; btn.textContent = '💾 Save effect + Patch'; } }
   }
 
+  // Unified save: identity (name/icon/effect-spell) + effect slots + ONE MPQ build + auto bot-repair.
+  async function glyphSaveAll(btn, force){
+    const g = _glyph.edit; const b = _glyph.builder;
+    if (!g) return;
+    const name   = document.getElementById('glyph-f-name')?.value.trim();
+    const iconId = parseInt(document.getElementById('glyph-f-icon')?.value || '0') || 0;
+    // effect components come from the beginner slot builder (custom glyphs only)
+    let comps = null;
+    if (b){
+      comps = glyphBuilderComponents();
+      if (!comps.length){ showToast('Set at least one effect slot','error'); return; }
+      for (const x of comps){
+        if (x.type === 'modifier' && !x.targetSpellId){ showToast('A modifier needs the spell it affects','error'); return; }
+        if (x.type === 'proc' && !x.triggerSpellId){ showToast('The proc/spread needs a trigger spell','error'); return; }
+        if (x.type === 'buff' && (x.duration|0)>0 && !x.triggerSpellId){ showToast('A temporary buff needs the spell that grants it','error'); return; }
+      }
+    }
+    const status = document.getElementById('glyph-effect-status') || document.getElementById('glyph-edit-status');
+    if (btn){ btn.disabled = true; btn.textContent = '⏳ Saving…'; }
+    if (status) status.textContent = 'Saving identity + effect, patching MPQ…';
+    const H = {'Content-Type':'application/json'};
+    try {
+      // 1) identity → GlyphProperties.dbc (skip MPQ, we build once at the end)
+      let r = await fetch(`${API}/glyph/save`, {method:'POST',headers:H,
+        body:JSON.stringify({ id:g.id, name, spellId:g.spellId, iconId, itemEntry:g.itemEntry, skip_mpq:true, force:!!force })});
+      let d = await r.json();
+      if (!d.ok){
+        if (status) status.textContent='';
+        if (/Safety stop/i.test(d.error||'') && !force){
+          const okc = await uiConfirm(d.error + '\n\nSave anyway?', {title:'Safety stop', okText:'Force save', danger:true});
+          if (btn){ btn.disabled=false; btn.textContent='💾 Save all + Patch'; }
+          if (okc) return glyphSaveAll(btn, true);
+          return;
+        }
+        showToast(d.error||'Save failed','error'); return;
+      }
+      // 2) effect → Spell.dbc (skip MPQ)
+      if (comps){
+        r = await fetch(`${API}/glyph/effect-rebuild`, {method:'POST',headers:H,
+          body:JSON.stringify({ spellId:b.spellId, name:(name||b.name), iconId, description:glyphBuilderDesc(), components:comps, skip_mpq:true })});
+        d = await r.json();
+        if (!d.ok){ if(status) status.textContent=''; showToast(d.error||'Effect save failed','error'); return; }
+      }
+      // 3) finalize → build MPQ once + auto-repair dangling bot refs
+      r = await fetch(`${API}/glyph/finalize`, {method:'POST',headers:H, body:'{}'});
+      d = await r.json();
+      if (!d.ok){ if(status) status.textContent=''; showToast(d.error||'MPQ build failed','error'); return; }
+      const fixed = d.data.bots_fixed|0;
+      const botmsg = fixed ? ` · ${fixed} bot ref(s) repaired` : '';
+      if (status) status.innerHTML = `<span style="color:#1eff00">✓ saved · MPQ patched${botmsg} — restart server + relog</span>`;
+      showToast(`Glyph saved + patched ✓${botmsg}`);
+      if (b) _glyphTipCache[b.spellId] = undefined;
+      _glyphTipCache[g.spellId] = undefined;
+      glyphLoadList();
+    } catch(e){ if(status) status.textContent=''; showToast('Server offline','error'); }
+    finally { if (btn){ btn.disabled = false; btn.textContent = '💾 Save all + Patch'; } }
+  }
+
   // ── Description generator (auto tooltip text from the modifier effects) ───────
   const _GLYPH_MODOP_PHRASE = {
     0:'the damage and healing', 1:'the duration', 2:'the threat', 5:'the range',
@@ -363,15 +423,16 @@
                          spellId: fx.spellId, name:(_glyph.edit && _glyph.edit.name) || fx.name, iconId: fx.iconId||0 };
       body.innerHTML = `
         <p style="color:var(--muted);font-size:0.72rem;margin:0 0 10px;line-height:1.4">
-          3 effect slots — set each to a modifier or a proc/spread. Saving rebuilds this custom spell (and its proc) and
-          patches <code>Spell.dbc</code> — <b>server restart</b> needed.</p>
+          3 effect slots — set each to a modifier or a proc/spread. <b>Save all + Patch</b> writes the name/icon,
+          rebuilds this custom spell (and its proc), patches <code>Spell.dbc</code> and auto-repairs any bots
+          using this glyph — <b>server restart</b> needed.</p>
         <div id="glyph-edit-slots"></div>
         <div style="margin-top:12px">
           <div style="color:var(--muted);font-size:0.7rem;margin-bottom:4px">🔎 In-game tooltip preview</div>
           <div id="glyph-edit-preview" style="background:linear-gradient(135deg,#0a1018,#050810);border:1px solid var(--border);border-radius:6px;padding:8px 11px;color:#1eff00;font-size:0.78rem;font-style:italic;min-height:20px"></div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:12px">
-          <button class="e-btn e-btn-green" onclick="glyphEffectRebuild(this)">💾 Save effect + Patch</button>
+          <button class="e-btn e-btn-green" onclick="glyphSaveAll(this)">💾 Save all + Patch</button>
           <span id="glyph-effect-status" style="color:var(--muted);font-size:0.76rem"></span>
         </div>`;
       glyphBuilderRender();
@@ -673,7 +734,7 @@
   async function glyphDelete(btn){
     const g = _glyph.edit; if (!g || !g.custom) return;
     const okc = await uiConfirm(`Delete custom glyph "${g.name}" (GP #${g.id}) and its item? `
-      + `${g.usage>0?`\n\n⚠️ ${g.usage} characters/bots use it — run "🤖 Repair Bots" afterwards.`:''}`,
+      + `${g.usage>0?`\n\n${g.usage} characters/bots use it — their glyph slot is cleared automatically.`:''}`,
       {title:'Delete glyph', okText:'Delete', danger:true});
     if (!okc) return;
     if (btn){ btn.disabled = true; btn.textContent = '⏳…'; }
