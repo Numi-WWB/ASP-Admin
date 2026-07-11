@@ -5023,6 +5023,28 @@ def _sync_custom_spells_to_dbc():
     return n
 
 
+_WOW_LOCALES = ("enUS", "enGB", "deDE", "frFR", "esES", "esMX",
+                "ruRU", "koKR", "zhCN", "zhTW", "ptBR", "itIT")
+
+def _client_locale_dirs(client_data_path):
+    """Return [(locale_code, dir_path), …] for every locale sub-folder of the
+    client Data\\ dir that holds Blizzard locale MPQs.  Custom DBC patches MUST
+    live here (as patch-<locale>-Z.MPQ): 3.3.5a loads locale patches AFTER the
+    base Data\\patch-*.MPQ, so a base patch is otherwise overridden by the
+    repack's own locale Spell.dbc / Item.dbc / GlyphProperties.dbc."""
+    out = []
+    if not client_data_path:
+        return out
+    for loc in _WOW_LOCALES:
+        d = os.path.join(client_data_path, loc)
+        if os.path.isdir(d) and (
+            os.path.exists(os.path.join(d, f"locale-{loc}.MPQ")) or
+            os.path.exists(os.path.join(d, f"patch-{loc}.MPQ"))
+        ):
+            out.append((loc, d))
+    return out
+
+
 def _build_item_patch_mpq():
     """Rebuild patch MPQ containing the current Item.dbc + custom Spell.dbc + extras.
     Returns (mpq_path, copied_to_client: bool, error: str|None)."""
@@ -5050,6 +5072,14 @@ def _build_item_patch_mpq():
             client_target = os.path.join(s["client_data_path"], patch_name)
             shutil.copy2(out_path, client_target)
             copied = True
+            # Also drop a locale copy that loads LAST. The client loads
+            # Data\<locale>\patch-<locale>-*.MPQ after the base Data\patch-*.MPQ,
+            # so without this the repack's locale Spell.dbc/Item.dbc override our
+            # custom DBCs client-side (custom spells invisible → glyphs auto-apply
+            # to slot 1 instead of the socket-targeting cursor, custom tooltips
+            # missing, etc.).
+            for loc, ldir in _client_locale_dirs(s["client_data_path"]):
+                shutil.copy2(out_path, os.path.join(ldir, f"patch-{loc}-Z.MPQ"))
         except PermissionError:
             return out_path, False, ("Patch built in the Patches folder, but copying it into Data\\ failed "
                                      "(file is locked). Please close World of Warcraft and save again.")
@@ -6014,7 +6044,16 @@ def glyph_create():
             "Effect_1": SPELL_EFFECT_APPLY_GLYPH, "EffectMiscValue_1": new_gid,
             # Match Blizzard's real glyph learn spells (e.g. 54857) so the client shows the normal
             # "select a glyph socket" flow + inscription cast bar instead of auto-applying.
+            # RangeIndex MUST be 1 (Self Only): the default template uses 6 (100yd Vision Range),
+            # which makes the client treat the right-click as a ranged targeted cast and apply to
+            # the first socket immediately, instead of entering the glyph-socket-targeting cursor.
             "Attributes": 0x10000000, "CastingTimeIndex": 6, "SchoolMask": 1,
+            "RangeIndex": 1, "DurationIndex": 0, "PowerType": 0,
+            # Targets = 0x20000 (TARGET_FLAG_GLYPH_SLOT) is what makes the client enter the
+            # "select a glyph socket" cursor on right-click instead of instantly applying to
+            # socket 0. InterruptFlags = 0x3F makes the inscription cast interruptible by
+            # movement/damage, exactly like real glyphs (can't be applied while running).
+            "Targets": 0x20000, "InterruptFlags": 0x3F, "BaseLevel": 0, "SpellLevel": 0,
         })
         keys = list(learn_cols.keys()); vals = list(learn_cols.values())
         execute(f"INSERT INTO spell_dbc ({','.join('`'+k+'`' for k in keys)}) "
@@ -6032,6 +6071,8 @@ def glyph_create():
             "displayid": _GLYPH_ITEM_DISPLAYID, "InventoryType": 0, "BagFamily": 16, "Flags": 64,
             "RequiredLevel": 1, "spellid_1": learn_id, "spelltrigger_1": 0, "spellcharges_1": -1,
             "SoundOverrideSubclass": 0,   # match real glyph items exactly (Blizzard uses 0, not -1)
+            "stackable": 20, "delay": 0,  # real glyphs stack to 20, no use-delay
+            "spellcooldown_1": 0, "spellcategorycooldown_1": 0,  # avoid DB default -1
         }
         ik = list(item_fields.keys()); iv = list(item_fields.values())
         execute(f"INSERT INTO item_template ({','.join('`'+k+'`' for k in ik)}) "
@@ -6518,6 +6559,25 @@ _GLYPH_AURA_TO_STAT = {v: k for k, v in _GLYPH_STAT_AURA.items()}
 _GLYPH_AURA_TO_STAT[(57, 0)] = "crit_spell"    # legacy flat spell-crit % → spell crit rating
 _GLYPH_AURA_TO_STAT[(65, 0)] = "haste_spell"   # legacy flat cast-haste % → spell haste rating
 
+_GLYPH_STAT_LABEL = {
+    "spellpower": "spell power", "attackpower": "attack power",
+    "stamina": "Stamina", "strength": "Strength", "agility": "Agility",
+    "intellect": "Intellect", "spirit": "Spirit", "armor": "armor",
+    "crit": "critical strike rating", "crit_spell": "spell critical strike rating",
+    "crit_melee": "melee critical strike rating", "crit_ranged": "ranged critical strike rating",
+    "haste": "haste rating", "haste_spell": "spell haste rating",
+    "haste_melee": "melee haste rating", "haste_ranged": "ranged haste rating",
+    "hit": "hit rating", "expertise": "expertise rating", "armorpen": "armor penetration rating",
+    "dodge": "dodge rating", "parry": "parry rating",
+}
+
+def _glyph_buff_desc(stat, amount):
+    """Client tooltip line for a stat buff aura (e.g. 'Increases spell power by 50.')."""
+    label = _GLYPH_STAT_LABEL.get(stat, stat or "a stat")
+    amt = int(amount or 0)
+    verb = "Increases" if amt >= 0 else "Reduces"
+    return f"{verb} {label} by {abs(amt)}."
+
 def _glyph_oncast_trigger_conflict(comps):
     """True if the on-cast effects (proc/spread + temporary buffs) name >1 distinct trigger spell.
     They all share one spell_proc row, so they must fire on the same trigger."""
@@ -6593,7 +6653,12 @@ def _assemble_glyph_effect(effect_id, name, icon_id, description, comps):
                 # temporary → a self-buff spell (duration) triggered on the glyph's proc
                 buff_id = _reserve()
                 bcols = dict(_SPELL_DBC_DEFAULTS)
+                _bdesc = _glyph_buff_desc(c.get("stat"), amount)
                 bcols.update({"ID": buff_id, "Name_Lang_enUS": f"{name} (buff)", "SpellIconID": icon_id,
+                              # Description (170) = spellbook text; AuraDescription/ToolTip (187) = the
+                              # line shown on the buff bar. Real buffs populate both — set both here or
+                              # the buff-bar tooltip is blank.
+                              "Description_Lang_enUS": _bdesc, "AuraDescription_Lang_enUS": _bdesc,
                               "Attributes": 0, "CastingTimeIndex": 1, "SchoolMask": 1,
                               "DurationIndex": _duration_index_for(dur),
                               "Effect_1": 6, "EffectAura_1": aura, "EffectMiscValue_1": misc,
@@ -6775,6 +6840,20 @@ def glyph_effect_rebuild():
                 if old_child >= _SPELL_CREATE_MIN_ID:
                     execute("DELETE FROM spell_dbc WHERE ID = %s", [old_child])
         has_proc = _assemble_glyph_effect(sid, name, icon_id, description, comps)
+        # keep the glyph item's on-use (learn) spell tooltip in sync — it's what shows as the
+        # "Use:" line on the item, and it must reflect the full auto-description, not just the
+        # first effect it was created with.
+        try:
+            gp_id = next((g["id"] for g in _read_glyph_dbc() if int(g.get("spellId") or 0) == sid), None)
+            if gp_id is not None:
+                learn = query("SELECT ID FROM spell_dbc WHERE (Effect_1=74 AND EffectMiscValue_1=%s) "
+                              "OR (Effect_2=74 AND EffectMiscValue_2=%s) OR (Effect_3=74 AND EffectMiscValue_3=%s)",
+                              [gp_id, gp_id, gp_id], one=True)
+                if learn and description:
+                    execute("UPDATE spell_dbc SET Description_Lang_enUS=%s, Name_Lang_enUS=%s WHERE ID=%s",
+                            [description, name, learn["ID"]])
+        except Exception:
+            pass
         mpq_path, copied, mpq_err = _build_item_patch_mpq()
         return ok({"effectSpellId": sid, "hasProc": has_proc, "mpq_path": mpq_path,
                    "copied_to_client": copied, "mpq_error": mpq_err})
