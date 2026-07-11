@@ -6031,6 +6031,7 @@ def glyph_create():
             "AllowableClass": class_mask, "Quality": 1, "bonding": 0, "Material": 4,
             "displayid": _GLYPH_ITEM_DISPLAYID, "InventoryType": 0, "BagFamily": 16, "Flags": 64,
             "RequiredLevel": 1, "spellid_1": learn_id, "spelltrigger_1": 0, "spellcharges_1": -1,
+            "SoundOverrideSubclass": 0,   # match real glyph items exactly (Blizzard uses 0, not -1)
         }
         ik = list(item_fields.keys()); iv = list(item_fields.values())
         execute(f"INSERT INTO item_template ({','.join('`'+k+'`' for k in ik)}) "
@@ -6041,7 +6042,7 @@ def glyph_create():
             _load_item_dbc()
         _item_dbc_add_or_update(item_id=item_entry, class_id=16, subclass_id=class_num,
                                 material=4, display_id=_GLYPH_ITEM_DISPLAYID, inv_type=0,
-                                sheathe=0, sound_override=-1)
+                                sheathe=0, sound_override=0)
         _save_item_dbc()
 
         # 3) GlyphProperties entry + DBC/MPQ patch
@@ -6443,7 +6444,7 @@ def glyph_proc_create():
         pr = {"SpellId": proc_id, "SchoolMask": 0, "SpellFamilyName": fam,
               "SpellFamilyMask0": m0 & 0xFFFFFFFF, "SpellFamilyMask1": m1 & 0xFFFFFFFF,
               "SpellFamilyMask2": m2 & 0xFFFFFFFF, "ProcFlags": _PROC_FLAG_DONE_HARMFUL_SPELL,
-              "SpellTypeMask": 1, "SpellPhaseMask": 2, "Cooldown": proc_cd, "Chance": 100}
+              "SpellTypeMask": 7, "SpellPhaseMask": 2, "Cooldown": proc_cd, "Chance": 100}
         pk = list(pr.keys()); pv = list(pr.values())
         execute(f"INSERT INTO spell_proc ({','.join('`'+k+'`' for k in pk)}) "
                 f"VALUES ({','.join(['%s']*len(pk))}) "
@@ -6493,66 +6494,146 @@ def _spread_aoe_cols(aoe_id, name, icon_id, trigger, yards, payload, damage_over
     return aoe
 
 
-def _assemble_glyph_effect(effect_id, aoe_id, name, icon_id, description, comps):
-    """Write ONE glyph effect spell (+ its AoE spell + spell_proc row) from a list of components
-    (modifiers + at most one proc). Uses the full defaults dict as base, so a rebuild cleanly
-    overwrites every field. Returns hasProc(bool). Caller reserves ids + rebuilds the MPQ."""
+# Stat "buff" components → (aura, EffectMiscValue). Base points = the amount, applied to SELF, so
+# socketing the glyph grants the player the stat. Crit/haste/hit/expertise/armor-pen use combat
+# RATING (SPELL_AURA_MOD_RATING = 189, misc = a bitmask of CombatRating bits — verified against
+# real spells), which is the uniform WotLK way to grant those across melee/ranged/spell.
+_GLYPH_STAT_AURA = {
+    "spellpower":  (13, 126),   # MOD_DAMAGE_DONE, misc 126 = all magic schools (flat spell power)
+    "attackpower": (99, 0),     # MOD_ATTACK_POWER
+    "stamina":     (29, 2), "strength": (29, 0), "agility": (29, 1),
+    "intellect":   (29, 3), "spirit":   (29, 4),   # MOD_STAT, misc = stat index
+    "armor":       (34, 1),     # MOD_RESISTANCE, misc 1 = armor
+    # combat rating (aura 189, misc = 1<<CR bitmask)
+    "crit":        (189, 1792),      # all crit (melee|ranged|spell)
+    "crit_spell":  (189, 1024), "crit_melee": (189, 256), "crit_ranged": (189, 512),
+    "haste":       (189, 917504),    # all haste (melee|ranged|spell)
+    "haste_spell": (189, 524288), "haste_melee": (189, 131072), "haste_ranged": (189, 262144),
+    "hit":         (189, 224),       # all hit (melee|ranged|spell)
+    "expertise":   (189, 8388608), "armorpen": (189, 16777216),
+    "dodge":       (189, 4), "parry": (189, 8),
+}
+# reverse map for reconstruction: (aura, misc) → stat key (+ legacy flat crit/haste from old glyphs)
+_GLYPH_AURA_TO_STAT = {v: k for k, v in _GLYPH_STAT_AURA.items()}
+_GLYPH_AURA_TO_STAT[(57, 0)] = "crit_spell"    # legacy flat spell-crit % → spell crit rating
+_GLYPH_AURA_TO_STAT[(65, 0)] = "haste_spell"   # legacy flat cast-haste % → spell haste rating
+
+def _glyph_oncast_trigger_conflict(comps):
+    """True if the on-cast effects (proc/spread + temporary buffs) name >1 distinct trigger spell.
+    They all share one spell_proc row, so they must fire on the same trigger."""
+    trigs = set()
+    for c in comps:
+        if c.get("type") == "proc" and int(c.get("triggerSpellId", 0) or 0):
+            trigs.add(int(c["triggerSpellId"]))
+        elif c.get("type") == "buff" and int(c.get("duration", 0) or 0) > 0 and int(c.get("triggerSpellId", 0) or 0):
+            trigs.add(int(c["triggerSpellId"]))
+    return len(trigs) > 1
+
+def _assemble_glyph_effect(effect_id, name, icon_id, description, comps):
+    """Write ONE glyph effect spell (+ any child spells + spell_proc row) from components:
+      • modifier      → passive ADD_*_MODIFIER aura on the affected spell
+      • buff, no dur  → passive stat aura on the owner (always on while socketed)
+      • buff, duration→ an on-cast temporary stat buff (proc-triggered self-buff for X sec)
+      • proc/spread   → on-cast AoE that hits enemies near the target
+    All on-cast effects (spread + temp buffs) share ONE trigger via a single spell_proc row, so
+    'cast Moonfire → spread AND gain +SP for X sec' works. Child spell ids are reserved internally.
+    Returns hasProc(bool). Caller passes the effect_id and rebuilds the MPQ afterwards."""
     def _insert_spell(cols):
         keys = list(cols.keys()); vals = list(cols.values())
         execute(f"INSERT INTO spell_dbc ({','.join('`'+k+'`' for k in keys)}) "
                 f"VALUES ({','.join(['%s']*len(keys))}) "
                 f"ON DUPLICATE KEY UPDATE {','.join(f'`{k}`=VALUES(`{k}`)' for k in keys if k != 'ID')}", vals)
-    mods = [c for c in comps if c.get("type") == "modifier"]
-    proc = next((c for c in comps if c.get("type") == "proc"), None)
+    _row = query("SELECT MAX(ID) AS m FROM spell_dbc WHERE ID >= %s", [_SPELL_CREATE_MIN_ID], one=True)
+    _next = [max(int(_row["m"] or 0), int(effect_id)) + 1]
+    def _reserve():
+        i = _next[0]; _next[0] += 1; return i
+
     cols = dict(_SPELL_DBC_DEFAULTS)
     cols.update({"ID": effect_id, "Name_Lang_enUS": name, "Description_Lang_enUS": description,
                  "SpellIconID": icon_id, "Attributes": 64, "CastingTimeIndex": 1, "SchoolMask": 1})
     family_set = 0
     slot = 1
-    for m in mods:
+    proc_trigger = 0      # shared trigger for all on-cast effects
+    need_cd = False       # a real-payload spread needs a small proc ICD (loop guard)
+    for c in comps:
         if slot > 3:
             break
-        aura = 108 if (m.get("mtype") == "pct") else 107
-        amount = abs(int(m.get("amount", 0) or 0))
-        value = -amount if (m.get("dir") == "dec") else amount
-        cols[f"Effect_{slot}"] = 6
-        cols[f"EffectAura_{slot}"] = aura
-        cols[f"EffectMiscValue_{slot}"] = int(m.get("modop", 0) or 0)
-        cols[f"EffectBasePoints_{slot}"] = value - 1
-        cols[f"EffectDieSides_{slot}"] = 1
-        cols[f"ImplicitTargetA_{slot}"] = 1
-        tgt = int(m.get("targetSpellId", 0) or 0)
-        if tgt:
-            fam, ma, mb, mc = _read_spell_family(tgt)
-            family_set = fam or family_set
-            cols[f"EffectSpellClassMaskA_{slot}"] = ma & 0xFFFFFFFF
-            cols[f"EffectSpellClassMaskB_{slot}"] = mb & 0xFFFFFFFF
-            cols[f"EffectSpellClassMaskC_{slot}"] = mc & 0xFFFFFFFF
-        slot += 1
+        t = c.get("type")
+        if t == "modifier":
+            aura = 108 if (c.get("mtype") == "pct") else 107
+            amount = abs(int(c.get("amount", 0) or 0))
+            value = -amount if (c.get("dir") == "dec") else amount
+            cols[f"Effect_{slot}"] = 6
+            cols[f"EffectAura_{slot}"] = aura
+            cols[f"EffectMiscValue_{slot}"] = int(c.get("modop", 0) or 0)
+            cols[f"EffectBasePoints_{slot}"] = value - 1
+            cols[f"EffectDieSides_{slot}"] = 1
+            cols[f"ImplicitTargetA_{slot}"] = 1
+            tgt = int(c.get("targetSpellId", 0) or 0)
+            if tgt:
+                fam, ma, mb, mc = _read_spell_family(tgt)
+                family_set = fam or family_set
+                cols[f"EffectSpellClassMaskA_{slot}"] = ma & 0xFFFFFFFF
+                cols[f"EffectSpellClassMaskB_{slot}"] = mb & 0xFFFFFFFF
+                cols[f"EffectSpellClassMaskC_{slot}"] = mc & 0xFFFFFFFF
+            slot += 1
+        elif t == "buff":
+            aura, misc = _GLYPH_STAT_AURA.get(c.get("stat"), (13, 126))
+            amount = int(c.get("amount", 0) or 0)
+            dur = int(c.get("duration", 0) or 0)
+            if dur <= 0:
+                # permanent → direct passive stat aura on SELF
+                cols[f"Effect_{slot}"] = 6
+                cols[f"EffectAura_{slot}"] = aura
+                cols[f"EffectMiscValue_{slot}"] = misc
+                cols[f"EffectBasePoints_{slot}"] = amount - 1
+                cols[f"EffectDieSides_{slot}"] = 1
+                cols[f"ImplicitTargetA_{slot}"] = 1
+            else:
+                # temporary → a self-buff spell (duration) triggered on the glyph's proc
+                buff_id = _reserve()
+                bcols = dict(_SPELL_DBC_DEFAULTS)
+                bcols.update({"ID": buff_id, "Name_Lang_enUS": f"{name} (buff)", "SpellIconID": icon_id,
+                              "Attributes": 0, "CastingTimeIndex": 1, "SchoolMask": 1,
+                              "DurationIndex": _duration_index_for(dur),
+                              "Effect_1": 6, "EffectAura_1": aura, "EffectMiscValue_1": misc,
+                              "EffectBasePoints_1": amount - 1, "EffectDieSides_1": 1, "ImplicitTargetA_1": 1})
+                _insert_spell(bcols)
+                cols[f"Effect_{slot}"] = 6
+                cols[f"EffectAura_{slot}"] = 42
+                cols[f"EffectTriggerSpell_{slot}"] = buff_id
+                cols[f"ImplicitTargetA_{slot}"] = 1
+                cols["ProcChance"] = 100
+                proc_trigger = proc_trigger or int(c.get("triggerSpellId", 0) or 0)
+            slot += 1
+        elif t == "proc":
+            trig = int(c.get("triggerSpellId", 0) or 0)
+            if trig:
+                payload = (c.get("payload") or "real").lower()
+                aoe_id = _reserve()
+                aoe = _spread_aoe_cols(aoe_id, name, icon_id, trig, int(c.get("radius", 20) or 20),
+                                       payload, c.get("damage"), c.get("school"))
+                _insert_spell(aoe)
+                cols[f"Effect_{slot}"] = 6
+                cols[f"EffectAura_{slot}"] = 42
+                cols[f"EffectTriggerSpell_{slot}"] = aoe_id
+                cols[f"ImplicitTargetA_{slot}"] = 1
+                cols["ProcChance"] = 100
+                proc_trigger = proc_trigger or trig
+                if payload == "real":
+                    need_cd = True
+                slot += 1
     if family_set:
         cols["SpellClassSet"] = family_set
-    proc_info = None
-    if proc and slot <= 3:
-        trig = int(proc.get("triggerSpellId", 0) or 0)
-        if trig:
-            payload = (proc.get("payload") or "real").lower()
-            aoe = _spread_aoe_cols(aoe_id, name, icon_id, trig, int(proc.get("radius", 20) or 20),
-                                   payload, proc.get("damage"), proc.get("school"))
-            _insert_spell(aoe)
-            cols[f"Effect_{slot}"] = 6
-            cols[f"EffectAura_{slot}"] = 42
-            cols[f"EffectTriggerSpell_{slot}"] = aoe_id
-            cols[f"ImplicitTargetA_{slot}"] = 1
-            cols["ProcChance"] = 100
-            fam, m0, m1, m2 = _read_spell_family(trig)
-            proc_info = {"fam": fam, "m0": m0, "m1": m1, "m2": m2, "payload": payload}
     _insert_spell(cols)
-    if proc_info:
-        cd = 250 if proc_info["payload"] == "real" else 0
-        pr = {"SpellId": effect_id, "SchoolMask": 0, "SpellFamilyName": proc_info["fam"],
-              "SpellFamilyMask0": proc_info["m0"] & 0xFFFFFFFF, "SpellFamilyMask1": proc_info["m1"] & 0xFFFFFFFF,
-              "SpellFamilyMask2": proc_info["m2"] & 0xFFFFFFFF, "ProcFlags": _PROC_FLAG_DONE_HARMFUL_SPELL,
-              "SpellTypeMask": 1, "SpellPhaseMask": 2, "Cooldown": cd, "Chance": 100}
+    if proc_trigger:
+        fam, m0, m1, m2 = _read_spell_family(proc_trigger)
+        # SpellTypeMask 7 = damage | heal | no-damage-aura → fires on DoT-only casts too (Insect Swarm),
+        # not just direct-damage spells (Moonfire).
+        pr = {"SpellId": effect_id, "SchoolMask": 0, "SpellFamilyName": fam,
+              "SpellFamilyMask0": m0 & 0xFFFFFFFF, "SpellFamilyMask1": m1 & 0xFFFFFFFF,
+              "SpellFamilyMask2": m2 & 0xFFFFFFFF, "ProcFlags": _PROC_FLAG_DONE_HARMFUL_SPELL,
+              "SpellTypeMask": 7, "SpellPhaseMask": 2, "Cooldown": (250 if need_cd else 0), "Chance": 100}
         pk = list(pr.keys()); pv = list(pr.values())
         execute(f"INSERT INTO spell_proc ({','.join('`'+k+'`' for k in pk)}) "
                 f"VALUES ({','.join(['%s']*len(pk))}) "
@@ -6562,12 +6643,30 @@ def _assemble_glyph_effect(effect_id, aoe_id, name, icon_id, description, comps)
             execute("DELETE FROM spell_proc WHERE SpellId = %s", [effect_id])
         except Exception:
             pass
-    return bool(proc_info)
+    return bool(proc_trigger)
+
+
+def _duration_index_for(seconds):
+    """Closest SpellDuration.dbc index for a duration in seconds (for temporary buffs)."""
+    ms = int(float(seconds) * 1000)
+    best, best_diff = 0, 1e18
+    for did, row in _DBC.get("SpellDuration", {}).items():
+        dm = row.get("dur_ms", 0) or 0
+        if dm <= 0:
+            continue
+        d = abs(dm - ms)
+        if d < best_diff:
+            best_diff, best = d, did
+    return best
 
 
 def _yards_for_radius_index(idx):
     row = _DBC.get("SpellRadius", {}).get(int(idx or 0))
     return int(round(row.get("radius", 20))) if row else 20
+
+def _seconds_for_duration_index(idx):
+    row = _DBC.get("SpellDuration", {}).get(int(idx or 0))
+    return int(round((row.get("dur_ms", 0) or 0) / 1000)) if row else 0
 
 def _find_spell_by_family_mask(family, mask_a):
     """Representative (id, name) of a spell matching SpellFamilyName + SpellClassMask — used to show
@@ -6599,27 +6698,44 @@ def _glyph_effect_components(spell_id):
     for n in (1, 2, 3):
         eff = int(row.get(f"Effect_{n}") or 0)
         aura = int(row.get(f"EffectAura_{n}") or 0)
+        misc = _s32(row.get(f"EffectMiscValue_{n}"))
         if eff == 6 and aura in (107, 108):
             value = _s32(row.get(f"EffectBasePoints_{n}")) + 1
             mask_a = int(row.get(f"EffectSpellClassMaskA_{n}") or 0)
             fam = int(row.get("SpellClassSet") or 0)
             tid, tname = _find_spell_by_family_mask(fam, mask_a) if mask_a else (0, "")
             out.append({"type": "modifier", "dir": "dec" if value < 0 else "inc",
-                        "modop": _s32(row.get(f"EffectMiscValue_{n}")), "mtype": "pct" if aura == 108 else "flat",
+                        "modop": misc, "mtype": "pct" if aura == 108 else "flat",
                         "amount": abs(value), "targetSpellId": tid, "targetName": tname})
+        elif eff == 6 and (aura, misc) in _GLYPH_AURA_TO_STAT:
+            out.append({"type": "buff", "stat": _GLYPH_AURA_TO_STAT[(aura, misc)],
+                        "amount": _s32(row.get(f"EffectBasePoints_{n}")) + 1})
         elif eff == 6 and aura == 42:
-            aoe_id = int(row.get(f"EffectTriggerSpell_{n}") or 0)
-            aoe = query("SELECT Effect_1, EffectTriggerSpell_1, EffectRadiusIndex_1 FROM spell_dbc WHERE ID = %s",
-                        [aoe_id], one=True) if aoe_id else None
-            payload, trig, tname, radius = "copy", 0, "", 20
-            if aoe:
-                radius = _yards_for_radius_index(int(aoe.get("EffectRadiusIndex_1") or 9))
-                if int(aoe.get("Effect_1") or 0) == 64:
-                    payload = "real"; trig = int(aoe.get("EffectTriggerSpell_1") or 0)
-                    tname = (_DBC_SPELL_DATA.get(trig) or {}).get("name", "")
-            if not trig and proc_row:
+            child_id = int(row.get(f"EffectTriggerSpell_{n}") or 0)
+            child = query("SELECT Effect_1, EffectAura_1, EffectMiscValue_1, EffectBasePoints_1, "
+                          "EffectTriggerSpell_1, EffectRadiusIndex_1, DurationIndex FROM spell_dbc "
+                          "WHERE ID = %s", [child_id], one=True) if child_id else None
+            trig, tname = 0, ""
+            if proc_row:
                 trig, tname = _find_spell_by_family_mask(proc_row["SpellFamilyName"], proc_row["SpellFamilyMask0"])
-            out.append({"type": "proc", "triggerSpellId": trig, "triggerName": tname, "radius": radius, "payload": payload})
+            child_aura = int(child.get("EffectAura_1") or 0) if child else 0
+            child_misc = _s32(child.get("EffectMiscValue_1")) if child else 0
+            if child and int(child.get("Effect_1") or 0) == 6 and (child_aura, child_misc) in _GLYPH_AURA_TO_STAT:
+                # temporary stat buff (self-buff spell with a duration)
+                out.append({"type": "buff", "stat": _GLYPH_AURA_TO_STAT[(child_aura, child_misc)],
+                            "amount": _s32(child.get("EffectBasePoints_1")) + 1,
+                            "duration": _seconds_for_duration_index(int(child.get("DurationIndex") or 0)),
+                            "triggerSpellId": trig, "triggerName": tname})
+            else:
+                # proc / spread (AoE)
+                payload, radius = "copy", 20
+                if child:
+                    radius = _yards_for_radius_index(int(child.get("EffectRadiusIndex_1") or 9))
+                    if int(child.get("Effect_1") or 0) == 64:
+                        payload = "real"; ctrig = int(child.get("EffectTriggerSpell_1") or 0)
+                        if ctrig:
+                            trig = ctrig; tname = (_DBC_SPELL_DATA.get(ctrig) or {}).get("name", "")
+                out.append({"type": "proc", "triggerSpellId": trig, "triggerName": tname, "radius": radius, "payload": payload})
         else:
             out.append({"type": "none"})
     return out
@@ -6642,6 +6758,8 @@ def glyph_effect_rebuild():
         return err("Set at least one effect slot")
     if sum(1 for c in comps if c["type"] == "proc") > 1:
         return err("Only one proc/spread per glyph")
+    if _glyph_oncast_trigger_conflict(comps):
+        return err("All on-cast effects (spread + temporary buffs) must use the same trigger spell")
     try:
         old = query("SELECT * FROM spell_dbc WHERE ID = %s", [sid], one=True)
         if not old:
@@ -6650,18 +6768,13 @@ def glyph_effect_rebuild():
             name = old.get("Name_Lang_enUS") or f"Spell #{sid}"
         if not icon_id:
             icon_id = int(old.get("SpellIconID") or 0)
-        # drop the old AoE spell(s) this effect triggered
+        # drop the old child spells (AoE / temp-buff) this effect triggered
         for n in (1, 2, 3):
             if int(old.get(f"EffectAura_{n}") or 0) == 42:
-                old_aoe = int(old.get(f"EffectTriggerSpell_{n}") or 0)
-                if old_aoe >= _SPELL_CREATE_MIN_ID:
-                    execute("DELETE FROM spell_dbc WHERE ID = %s", [old_aoe])
-        # reserve a fresh AoE id if the new build has a proc
-        aoe_id = 0
-        if any(c["type"] == "proc" for c in comps):
-            r = query("SELECT MAX(ID) AS m FROM spell_dbc WHERE ID >= %s", [_SPELL_CREATE_MIN_ID], one=True)
-            aoe_id = (r["m"] or _SPELL_CREATE_MIN_ID - 1) + 1
-        has_proc = _assemble_glyph_effect(sid, aoe_id, name, icon_id, description, comps)
+                old_child = int(old.get(f"EffectTriggerSpell_{n}") or 0)
+                if old_child >= _SPELL_CREATE_MIN_ID:
+                    execute("DELETE FROM spell_dbc WHERE ID = %s", [old_child])
+        has_proc = _assemble_glyph_effect(sid, name, icon_id, description, comps)
         mpq_path, copied, mpq_err = _build_item_patch_mpq()
         return ok({"effectSpellId": sid, "hasProc": has_proc, "mpq_path": mpq_path,
                    "copied_to_client": copied, "mpq_error": mpq_err})
@@ -6685,18 +6798,14 @@ def glyph_effect_build():
         return err("Add at least one effect")
     if len(comps) > 3:
         return err("A spell has at most 3 effects — remove one")
-    mods  = [c for c in comps if c.get("type") == "modifier"]
-    procs = [c for c in comps if c.get("type") == "proc"]
-    if len(procs) > 1:
+    if len([c for c in comps if c.get("type") == "proc"]) > 1:
         return err("Only one proc/spread per glyph (spell_proc allows one trigger per spell)")
+    if _glyph_oncast_trigger_conflict(comps):
+        return err("All on-cast effects (spread + temporary buffs) must use the same trigger spell")
     try:
         row = query("SELECT MAX(ID) AS m FROM spell_dbc WHERE ID >= %s", [_SPELL_CREATE_MIN_ID], one=True)
-        next_id = (row["m"] or _SPELL_CREATE_MIN_ID - 1) + 1
-        effect_id = next_id; next_id += 1
-        aoe_id = 0
-        if procs:
-            aoe_id = next_id; next_id += 1
-        has_proc = _assemble_glyph_effect(effect_id, aoe_id, name, icon_id, description, comps)
+        effect_id = (row["m"] or _SPELL_CREATE_MIN_ID - 1) + 1
+        has_proc = _assemble_glyph_effect(effect_id, name, icon_id, description, comps)
         return ok({"effectSpellId": effect_id, "description": description, "hasProc": has_proc})
     except Exception as e:
         return err(str(e), 500)

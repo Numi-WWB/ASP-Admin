@@ -1,0 +1,13 @@
+{
+  "db_host": "127.0.0.1",
+  "db_port": 3306,
+  "db_user": "acore",
+  "db_password": "acore",
+  "dbc_server_path": "C:\\Users\\Jose\\Desktop\\ASP\\Server\\data\\dbc",
+  "dbc_client_path": "D:\\WOTLK\\dbc",
+  "client_data_path": "D:\\WOTLK\\Data",
+  "mpq_output_dir": "D:\\Scipts\\DBA\\mpq",
+  "exports_dir": "D:\\Scipts\\DBA",
+  "patch_name": "patch-Z.MPQ",
+  "auto_copy_patch": true
+}

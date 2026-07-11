@@ -49,6 +49,18 @@
     {v:24, label:'Bonus multiplier'},
   ];
   function _glyphModopLabel(v){ const o = GLYPH_SPELLMODOPS.find(x=>x.v===v); return o?o.label:('SpellModOp '+v); }
+  // Stat "buff" options — grant the player a flat stat when the glyph is socketed.
+  const GLYPH_STATS = [
+    {v:'spellpower', label:'Spell Power'}, {v:'attackpower', label:'Attack Power'},
+    {v:'stamina', label:'Stamina'}, {v:'strength', label:'Strength'}, {v:'agility', label:'Agility'},
+    {v:'intellect', label:'Intellect'}, {v:'spirit', label:'Spirit'},
+    {v:'crit', label:'Crit rating — all'}, {v:'crit_spell', label:'Crit rating — spell'}, {v:'crit_melee', label:'Crit rating — melee'}, {v:'crit_ranged', label:'Crit rating — ranged'},
+    {v:'haste', label:'Haste rating — all'}, {v:'haste_spell', label:'Haste rating — spell'}, {v:'haste_melee', label:'Haste rating — melee'}, {v:'haste_ranged', label:'Haste rating — ranged'},
+    {v:'hit', label:'Hit rating — all'}, {v:'expertise', label:'Expertise rating'}, {v:'armorpen', label:'Armor Penetration'},
+    {v:'dodge', label:'Dodge rating'}, {v:'parry', label:'Parry rating'}, {v:'armor', label:'Armor'},
+  ];
+  function _glyphStatLabel(v){ const o = GLYPH_STATS.find(x=>x.v===v); return o?o.label:v; }
+  function _glyphStatUnit(v){ const o = GLYPH_STATS.find(x=>x.v===v); return (o && o.unit) ? o.unit : ''; }
   // SpellModOps whose value is in milliseconds → show a friendly time hint
   const _GLYPH_MS_MODOPS = new Set([1,10,11,19,21]);
   const AURA_ADD_FLAT = 107, AURA_ADD_PCT = 108;
@@ -291,6 +303,7 @@
     for (const x of comps){
       if (x.type === 'modifier' && !x.targetSpellId){ showToast('A modifier needs the spell it affects','error'); return; }
       if (x.type === 'proc' && !x.triggerSpellId){ showToast('The proc/spread needs a trigger spell','error'); return; }
+      if (x.type === 'buff' && (x.duration|0)>0 && !x.triggerSpellId){ showToast('A temporary buff needs the spell that grants it','error'); return; }
     }
     const status = document.getElementById('glyph-effect-status');
     if (btn){ btn.disabled = true; btn.textContent = '⏳ Building…'; }
@@ -767,6 +780,7 @@
       showToast('Only one proc/spread per glyph','error'); glyphBuilderRender(); return;
     }
     if (type === 'modifier') slots[i] = {type:'modifier', dir:'inc', modop:11, mtype:'flat', amount:5000, targetSpellId:0, targetName:''};
+    else if (type === 'buff') slots[i] = {type:'buff', stat:'spellpower', amount:50, duration:0, triggerSpellId:0, triggerName:''};
     else if (type === 'proc') slots[i] = {type:'proc', triggerSpellId:0, triggerName:'', radius:20, payload:'real'};
     else slots[i] = {type:'none'};
     glyphBuilderRender();
@@ -779,6 +793,7 @@
       const typeSel = `<select onchange="glyphSlotType(${i}, this.value)" style="padding:4px 7px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:0.74rem">
           <option value="none" ${c.type==='none'?'selected':''}>— empty —</option>
           <option value="modifier" ${c.type==='modifier'?'selected':''}>🔧 Modifier</option>
+          <option value="buff" ${c.type==='buff'?'selected':''}>🌟 Buff (stats)</option>
           <option value="proc" ${c.type==='proc'?'selected':''}>🎯 Proc / spread</option>
         </select>`;
       const head = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:${c.type==='none'?'0':'8px'}">
@@ -802,6 +817,22 @@
             <div style="flex:1;font-size:0.76rem">${c.targetName ? `<span style="color:var(--text)">${_glyphEsc(c.targetName)}</span> <span style="color:var(--muted)">#${c.targetSpellId}</span>` : '<span style="color:#e0a520">⚠ pick the spell it modifies</span>'}</div>
             <button class="e-btn" style="padding:3px 9px" onclick="glyphBuilderPickTarget(${i})">🔍 Spell</button>
           </div>`;
+      } else if (c.type === 'buff'){
+        const stats = GLYPH_STATS.map(o => `<option value="${o.v}">${o.label}</option>`).join('');
+        const temp = (c.duration|0) > 0;
+        body = `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <div><label style="display:block;color:var(--muted);font-size:0.66rem">Stat</label>
+              <select onchange="_glyph.builder.slots[${i}].stat=this.value;glyphBuilderPreview()" style="padding:5px 7px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)" data-stat="${c.stat}">${stats}</select></div>
+            <div><label style="display:block;color:var(--muted);font-size:0.66rem">Amount</label>
+              <input type="number" value="${c.amount}" oninput="_glyph.builder.slots[${i}].amount=parseInt(this.value)||0;glyphBuilderPreview()" style="width:90px;padding:5px 7px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)"></div>
+            <div><label style="display:block;color:var(--muted);font-size:0.66rem">Duration (sec)</label>
+              <input type="number" value="${c.duration||0}" oninput="_glyph.builder.slots[${i}].duration=parseInt(this.value)||0;glyphBuilderRender()" title="0 = permanent while socketed" style="width:100px;padding:5px 7px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text)"></div>
+          </div>
+          ${temp ? `<div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+            <span style="color:var(--muted);font-size:0.66rem">On cast of:</span>
+            <div style="flex:1;font-size:0.76rem">${c.triggerName ? `<span style="color:var(--text)">${_glyphEsc(c.triggerName)}</span> <span style="color:var(--muted)">#${c.triggerSpellId}</span>` : '<span style="color:#e0a520">⚠ pick the spell that grants it (e.g. Moonfire)</span>'}</div>
+            <button class="e-btn" style="padding:3px 9px" onclick="glyphBuilderPickTrigger(${i})">🔍 Spell</button></div>`
+          : `<div style="color:var(--muted);font-size:0.64rem;margin-top:4px">0 sec = permanent (always on while socketed). Set a duration for a temporary buff on cast.</div>`}`;
       } else if (c.type === 'proc'){
         body = `<div style="display:flex;gap:8px;align-items:center">
             <span style="color:var(--muted);font-size:0.66rem">Trigger:</span>
@@ -820,6 +851,7 @@
       return `<div style="border:1px solid ${border};border-radius:6px;padding:9px 11px;margin-bottom:8px">${head}${body}</div>`;
     }).join('');
     box.querySelectorAll('select[data-modop]').forEach(sel => { sel.value = sel.getAttribute('data-modop'); });
+    box.querySelectorAll('select[data-stat]').forEach(sel => { sel.value = sel.getAttribute('data-stat'); });
     glyphBuilderPreview();
   }
   function glyphBuilderPickTarget(i){
@@ -842,6 +874,12 @@
         const prop = _glyphModopPhrase(c.modop) + (c.targetName ? ` of ${c.targetName}` : '');
         const amt = c.mtype === 'pct' ? (c.amount + '%') : (_GLYPH_MS_MODOPS.has(c.modop) ? _glyphMsPhrase(c.amount) : String(c.amount));
         parts.push(`${verb} ${prop} by ${amt}.`);
+      } else if (c.type === 'buff'){
+        const stat = _glyphStatLabel(c.stat).toLowerCase(), amt = `${c.amount}${_glyphStatUnit(c.stat)}`;
+        if ((c.duration|0) > 0)
+          parts.push(`When you cast ${c.triggerName || 'a spell'}, gain ${amt} ${stat} for ${c.duration} sec.`);
+        else
+          parts.push(`Increases your ${stat} by ${amt}.`);
       } else if (c.type === 'proc'){
         parts.push(`When you cast ${c.triggerName || 'a spell'}, it also strikes all enemies within ${c.radius} yards of your target.`);
       }
@@ -881,6 +919,7 @@
         for (const x of comps){
           if (x.type === 'modifier' && !x.targetSpellId){ showToast('A modifier needs the spell it affects','error'); if(btn){btn.disabled=false;btn.textContent='➕ Create glyph + Patch';} return; }
           if (x.type === 'proc' && !x.triggerSpellId){ showToast('The proc/spread needs a trigger spell','error'); if(btn){btn.disabled=false;btn.textContent='➕ Create glyph + Patch';} return; }
+          if (x.type === 'buff' && (x.duration|0)>0 && !x.triggerSpellId){ showToast('A temporary buff needs the spell that grants it','error'); if(btn){btn.disabled=false;btn.textContent='➕ Create glyph + Patch';} return; }
         }
         if (status) status.textContent = 'Building combined effect spell…';
         const br = await fetch(`${API}/glyph/effect-build`, {method:'POST',headers:{'Content-Type':'application/json'},
