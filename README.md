@@ -44,7 +44,6 @@ Join the ASP community discord https://discord.gg/wvdjmC3eab
 
 ## What's broken
 - Quest creator fails in you pick all classes / races
-- Custom glyphs automatically go into the 1. slot overwriting each other
 
 ## Notes
 
